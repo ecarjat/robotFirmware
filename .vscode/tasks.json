@@ -1,0 +1,48 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "CMake: install",
+			"type": "shell",
+			"command": "poetry",
+			"args": [
+				"run",
+				"python",
+				"host/kvbl_tool.py",
+				"--port",
+				"${input:kvblPort}",
+				"upload",
+				"${workspaceFolder}/build/Debug/stm32Controller.bin"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/../bootloader"
+			},
+			"group": "build",
+			"problemMatcher": [],
+			"dependsOn": [
+				"CMake: build"
+			],
+			"detail": "Build then erase/write/verify/boot via kvbl upload"
+		},
+		{
+			"type": "cmake",
+			"label": "CMake: build",
+			"command": "build",
+			"targets": [
+				"all"
+			],
+			"preset": "Debug",
+			"group": "build",
+			"problemMatcher": [],
+			"detail": "CMake template build task"
+		}
+	],
+	"inputs": [
+		{
+			"id": "kvblPort",
+			"type": "promptString",
+			"description": "Serial/CDC port for bootloader (e.g. /dev/cu.usbmodemXYZ)",
+			"default": "/dev/cu.usbmodem3074395434311"
+		}
+	]
+}

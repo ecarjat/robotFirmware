@@ -1,0 +1,8 @@
+build
+mx.scratch
+!.settings
+bootloader
+esp32
+common
+legacy
+build/
