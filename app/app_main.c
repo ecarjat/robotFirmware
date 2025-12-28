@@ -6,12 +6,15 @@
 #include "app_main.h"
 #include "app_config.h"
 #include "shared_protocol/robot_protocol.h"
-#include "framing_cobs.h"
 #include "mux_channels.h"
+#include "usbd_cdc_if.h"
 
 #define APP_LINK_UART                APP_LOG_UART
 #define APP_LINK_RX_BUFFER_BYTES     512U
-#define APP_LINK_FRAME_BUFFER_BYTES  ROBOT_PROTOCOL_FRAME_MAX_SIZE
+#define APP_LINK_FRAME_BUFFER_BYTES  ROBOT_FRAME_MAX_ENCODED
+#define APP_LINK_TX_BUFFER_BYTES     320U
+#define APP_TELEM_PERIOD_MS          20U
+#define APP_HEARTBEAT_TIMEOUT_MS     250U
 
 static void app_init(void);
 static void app_idle_tick(void);
@@ -20,10 +23,11 @@ static void app_link_start(void);
 static void app_link_process_chunk(const uint8_t *data, size_t len);
 static void app_link_flush_frame(void);
 static void app_link_handle_encoded_frame(const uint8_t *frame, size_t len);
-static void app_link_handle_decoded_frame(const uint8_t *frame, size_t len);
+static void app_link_dispatch(const robot_frame_t *frame);
 static void app_cmd_handler(uint8_t msg_type, const uint8_t *payload, size_t len, void *ctx);
 static void app_link_restart_rx(void);
-static uint32_t app_crc32_compute(const uint8_t *data, size_t len, uint32_t seed);
+static bool app_link_send(uint8_t type, uint16_t flags, const uint8_t *payload, uint16_t len, uint16_t seq_override);
+static void app_send_telem(void);
 
 void app_main(void)
 {
@@ -66,21 +70,38 @@ static robot_mux_t s_mux;
 static uint8_t s_uart_rx_buffer[APP_LINK_RX_BUFFER_BYTES];
 static uint8_t s_cobs_frame_buffer[APP_LINK_FRAME_BUFFER_BYTES];
 static size_t  s_cobs_frame_len = 0U;
-static uint8_t s_decode_buffer[APP_LINK_FRAME_BUFFER_BYTES];
+static uint8_t s_tx_buffer[APP_LINK_TX_BUFFER_BYTES];
+static uint16_t s_seq_counters[ROBOT_CHANNEL_MAX + 1U] = {0};
+static uint32_t s_last_telem_ms = 0U;
+static uint32_t s_last_cmd_ms = 0U;
 
 static void app_init(void)
 {
     robot_mux_init(&s_mux);
     robot_mux_register(&s_mux, ROBOT_CHANNEL_CMD, app_cmd_handler, NULL);
 
-    APP_LOG_INFO("Booting robot firmware (protocol v%u)", ROBOT_PROTOCOL_VERSION);
+    APP_LOG_INFO("Booting robot firmware (frame v%u)", ROBOT_FRAME_VERSION);
     APP_LOG_INFO("CMD channel id: %u", ROBOT_CHANNEL_CMD);
 
     app_link_start();
+    s_last_cmd_ms = HAL_GetTick();
 }
 
 static void app_idle_tick(void)
 {
+    uint32_t now = HAL_GetTick();
+    if ((now - s_last_telem_ms) >= APP_TELEM_PERIOD_MS)
+    {
+        app_send_telem();
+        s_last_telem_ms = now;
+    }
+
+    if ((now - s_last_cmd_ms) > APP_HEARTBEAT_TIMEOUT_MS)
+    {
+        APP_LOG_ERROR("Link heartbeat timeout");
+        s_last_cmd_ms = now; // rate-limit log spam
+    }
+
     HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
     HAL_Delay(APP_IDLE_TICK_MS);
 }
@@ -92,7 +113,13 @@ static void app_log_uart_write(const uint8_t *data, size_t len)
         return;
     }
 
-    HAL_UART_Transmit(APP_LOG_UART, (uint8_t *)data, (uint16_t)len, 10U);
+    /* Send over USB CDC (HS instance in FS PHY); fall back to USART2 on failure. */
+    if (USBD_OK != CDC_Transmit_HS((uint8_t *)data, (uint16_t)len))
+    {
+#ifdef APP_LOG_UART
+        HAL_UART_Transmit(APP_LOG_UART, (uint8_t *)data, (uint16_t)len, 10U);
+#endif
+    }
 }
 
 static void app_link_start(void)
@@ -155,52 +182,82 @@ static void app_link_flush_frame(void)
 
 static void app_link_handle_encoded_frame(const uint8_t *frame, size_t len)
 {
-    size_t decoded_len = robot_cobs_decode(frame, len, s_decode_buffer, sizeof(s_decode_buffer));
-    if (decoded_len == 0U)
+    robot_frame_t decoded;
+    robot_frame_t ack;
+    uint8_t encoded_ack[ROBOT_FRAME_MAX_ENCODED];
+    size_t encoded_ack_len = 0U;
+
+    if (len + 1U > ROBOT_FRAME_MAX_ENCODED)
     {
-        APP_LOG_ERROR("COBS decode failed");
+        APP_LOG_ERROR("Encoded frame too long (%u)", (unsigned int)len);
         return;
     }
-    app_link_handle_decoded_frame(s_decode_buffer, decoded_len);
+
+    uint8_t encoded_buf[ROBOT_FRAME_MAX_ENCODED];
+    memcpy(encoded_buf, frame, len);
+    encoded_buf[len] = 0x00U;
+
+    if (!robot_frame_decode(encoded_buf, len + 1U, &decoded))
+    {
+        APP_LOG_ERROR("Frame decode failed (len=%u)", (unsigned int)len);
+        return;
+    }
+
+    /* Auto-ACK if requested */
+    if ((decoded.hdr.flags & ROBOT_FLAG_ACK_REQ) != 0U)
+    {
+        if (robot_frame_init(&ack,
+                             ROBOT_MSG_ACK,
+                             decoded.hdr.seq,
+                             ROBOT_FLAG_IS_ACK,
+                             NULL,
+                             0U) &&
+            robot_frame_encode(&ack, encoded_ack, sizeof(encoded_ack), &encoded_ack_len))
+        {
+            HAL_UART_Transmit(APP_LINK_UART, encoded_ack, (uint16_t)encoded_ack_len, 10U);
+        }
+    }
+
+    app_link_dispatch(&decoded);
 }
 
-static void app_link_handle_decoded_frame(const uint8_t *frame, size_t len)
+static void app_link_dispatch(const robot_frame_t *frame)
 {
-    if (len < sizeof(robot_frame_header_t) + sizeof(uint32_t))
+    if (frame == NULL)
     {
-        APP_LOG_ERROR("Frame too small (%u)", (unsigned int)len);
         return;
     }
 
-    const robot_frame_header_t *hdr = (const robot_frame_header_t *)frame;
-    uint16_t payload_len = hdr->payload_len;
-    size_t expected = sizeof(robot_frame_header_t) + payload_len + sizeof(uint32_t);
-    if (len != expected)
+    /* Track link liveness on CMD heartbeats */
+    if (frame->hdr.type == ROBOT_MSG_CMD_HEARTBEAT)
     {
-        APP_LOG_ERROR("Frame length mismatch (got %u expected %u)", (unsigned int)len, (unsigned int)expected);
-        return;
+        s_last_cmd_ms = HAL_GetTick();
     }
 
-    const uint8_t *payload = frame + sizeof(robot_frame_header_t);
-    uint32_t frame_crc;
-    memcpy(&frame_crc, payload + payload_len, sizeof(frame_crc));
-
-    uint32_t calc_crc = app_crc32_compute(frame, len - sizeof(uint32_t), 0U);
-    if (calc_crc != frame_crc)
-    {
-        APP_LOG_ERROR("CRC mismatch (calc=0x%08lx rx=0x%08lx)", (unsigned long)calc_crc, (unsigned long)frame_crc);
-        return;
-    }
-
-    robot_mux_dispatch(&s_mux, hdr->channel, hdr->msg_type, payload, payload_len);
+    robot_mux_dispatch(&s_mux, frame->hdr.type, frame->payload, frame->hdr.len);
 }
 
 static void app_cmd_handler(uint8_t msg_type, const uint8_t *payload, size_t len, void *ctx)
 {
-    (void)payload;
-    (void)len;
     (void)ctx;
-    APP_LOG_INFO("CMD handler invoked, msg_type=%u", msg_type);
+    if (msg_type == ROBOT_MSG_CMD_TELEOP)
+    {
+        if (len < sizeof(robot_cmd_teleop_t))
+        {
+            APP_LOG_ERROR("CMD teleop size mismatch (%u)", (unsigned int)len);
+            return;
+        }
+        const robot_cmd_teleop_t *cmd = (const robot_cmd_teleop_t *)payload;
+        APP_LOG_INFO("Teleop fwd=%.2f turn=%.2f flags=0x%04x", (double)cmd->vx_mps, (double)cmd->wz_radps, cmd->flags);
+    }
+    else if (msg_type == ROBOT_MSG_CMD_HEARTBEAT)
+    {
+        APP_LOG_INFO("Heartbeat received");
+    }
+    else
+    {
+        APP_LOG_INFO("CMD handler invoked, msg_type=0x%02x", msg_type);
+    }
 }
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
@@ -223,38 +280,38 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     app_link_restart_rx();
 }
 
-static uint32_t app_crc32_compute(const uint8_t *data, size_t len, uint32_t seed)
+static bool app_link_send(uint8_t type, uint16_t flags, const uint8_t *payload, uint16_t len, uint16_t seq_override)
 {
-    if (data == NULL)
+    robot_frame_t frame;
+    uint8_t encoded[ROBOT_FRAME_MAX_ENCODED];
+    size_t encoded_len = 0U;
+
+    uint16_t seq = (seq_override != 0U) ? seq_override : ++s_seq_counters[robot_channel_from_type(type)];
+    if (!robot_frame_init(&frame, type, seq, flags, payload, len))
     {
-        return 0U;
+        return false;
+    }
+    if (!robot_frame_encode(&frame, encoded, sizeof(encoded), &encoded_len))
+    {
+        return false;
     }
 
-    uint32_t init_value = seed ^ 0xFFFFFFFFUL;
-    __HAL_CRC_INITIALCRCVALUE_CONFIG(&hcrc, init_value);
-    __HAL_CRC_DR_RESET(&hcrc);
+    return (HAL_UART_Transmit(APP_LINK_UART, encoded, (uint16_t)encoded_len, 10U) == HAL_OK);
+}
 
-    uint32_t word = 0U;
-    uint32_t byte_index = 0U;
-    for (size_t i = 0; i < len; ++i)
+static void app_send_telem(void)
+{
+    robot_telem_v1_t telem;
+    memset(&telem, 0, sizeof(telem));
+    telem.version = 1U;
+    telem.status = 0U;
+    telem.timestamp_ms = HAL_GetTick();
+    telem.batt_v = 0.0f;
+    telem.batt_pct = 0.0f;
+    telem.temp_c = 0.0f;
+
+    if (!app_link_send(ROBOT_MSG_TELEM_FRAME, 0U, (const uint8_t *)&telem, sizeof(telem), 0U))
     {
-        word |= ((uint32_t)data[i]) << (8U * byte_index);
-        byte_index++;
-
-        if (byte_index == 4U)
-        {
-            hcrc.Instance->DR = word;
-            word = 0U;
-            byte_index = 0U;
-        }
+        APP_LOG_ERROR("Failed to send telem frame");
     }
-
-    if (byte_index != 0U)
-    {
-        hcrc.Instance->DR = word;
-    }
-
-    uint32_t crc = hcrc.Instance->DR ^ 0xFFFFFFFFUL;
-    __HAL_CRC_INITIALCRCVALUE_CONFIG(&hcrc, 0xFFFFFFFFUL);
-    return crc;
 }

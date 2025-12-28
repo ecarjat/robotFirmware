@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     common/crc32.c
     common/framing_cobs.c
     common/mux_channels.c
+    common/shared_protocol/robot_protocol.c
 )
 
 # Add include paths
@@ -72,7 +73,17 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     # Add user defined libraries
 )
 
-# Generate raw binary for bootloader consumption (offset already handled in linker script)
+# Emit a firmware.map alias for build analyzers
 add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
-    COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin
-    COMMENT "Generating ${CMAKE_PROJECT_NAME}.bin")
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_PROJECT_NAME}.map ${CMAKE_CURRENT_BINARY_DIR}/firmware.map
+    COMMENT "Copying ${CMAKE_PROJECT_NAME}.map to firmware.map")
+
+# Generate raw binary for bootloader consumption (offset already handled in linker script)
+find_program(OBJCOPY_BIN arm-none-eabi-objcopy)
+if(OBJCOPY_BIN)
+    add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+        COMMAND ${OBJCOPY_BIN} -O binary $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin
+        COMMENT "Generating ${CMAKE_PROJECT_NAME}.bin")
+else()
+    message(WARNING "objcopy not found; binary image will not be generated")
+endif()
