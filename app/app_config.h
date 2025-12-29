@@ -10,7 +10,7 @@
 extern USBD_HandleTypeDef hUsbDeviceHS;
 extern UART_HandleTypeDef huart2;
 extern CRC_HandleTypeDef hcrc;
-#define APP_LOG_UART (&huart2)
+#define APP_LINK_UART (&huart2)
 
 void app_log_printf(const char *fmt, ...);
 

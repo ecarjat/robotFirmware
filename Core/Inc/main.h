@@ -108,6 +108,12 @@ void Error_Handler(void);
 #define MOTOR3_TX_GPIO_Port GPIOD
 #define MOTOR3_RX_Pin GPIO_PIN_9
 #define MOTOR3_RX_GPIO_Port GPIOD
+#define BMM150_CS_Pin GPIO_PIN_10
+#define BMM150_CS_GPIO_Port GPIOD
+#define BMI270_CS_Pin GPIO_PIN_14
+#define BMI270_CS_GPIO_Port GPIOD
+#define ICM45686_CS_Pin GPIO_PIN_15
+#define ICM45686_CS_GPIO_Port GPIOD
 #define MOTOR2_TX_Pin GPIO_PIN_6
 #define MOTOR2_TX_GPIO_Port GPIOC
 #define MOTOR2_RX_Pin GPIO_PIN_7
