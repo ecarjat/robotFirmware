@@ -204,8 +204,8 @@ bool imu_bmi270_init(void)
     spi_bus_device_init(&s_bmi_spi,
                         BMI270_CS_GPIO_Port,
                         BMI270_CS_Pin,
-                        SPI_POLARITY_LOW,
-                        SPI_PHASE_1EDGE,
+                        SPI_POLARITY_HIGH,
+                        SPI_PHASE_2EDGE,
                         hspi6.Init.BaudRatePrescaler,
                         hspi6.Init.DataSize);
 

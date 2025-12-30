@@ -52,6 +52,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     drivers/imu/imu_bus.c
     drivers/imu/imu_bmi270.c
     drivers/imu/imu_icm42688.c
+    drivers/imu/imu_exti.c
     drivers/imu/imu_bus_sched.c
     drivers/spi_bus.c
     libs/BMI270_SensorAPI/bmi2.c

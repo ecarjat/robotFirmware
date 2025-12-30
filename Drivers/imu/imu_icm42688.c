@@ -492,15 +492,3 @@ bool imu_icm42688_try_get_latest(imu_icm42688_sample_t *out, uint32_t *seq)
     *out = sample;
     return true;
 }
-
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-    if (GPIO_Pin == ICM42688_INT1_Pin)
-    {
-        imu_icm42688_handle_int1();
-    }
-    else if (GPIO_Pin == BMI270_INT1_Pin)
-    {
-        imu_bmi270_handle_int1();
-    }
-}
