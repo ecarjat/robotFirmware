@@ -1,4 +1,3 @@
-#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -11,6 +10,7 @@
 #include "imu_bmi270.h"
 #include "imu_bus.h"
 #include "imu_icm42688.h"
+#include "imu_sched.h"
 #include "mux_channels.h"
 #include "shared_protocol/robot_protocol.h"
 #include "stm32h7xx_hal.h"
@@ -21,6 +21,7 @@
 #define APP_LINK_TX_BUFFER_BYTES 320U
 #define APP_TELEM_PERIOD_MS 20U
 #define APP_HEARTBEAT_TIMEOUT_MS 250U
+#define APP_LOG_PERIOD_MS 500U
 #ifndef APP_LINK_DEBUG_FRAMES
 #define APP_LINK_DEBUG_FRAMES 1U
 #endif
@@ -34,7 +35,6 @@
 
 static void app_init(void);
 static void app_idle_tick(void);
-static void app_log_uart_write(const uint8_t *data, size_t len);
 static void app_link_start(void);
 static void app_link_process_chunk(const uint8_t *data, size_t len);
 static void app_link_flush_frame(void);
@@ -61,30 +61,6 @@ void app_main(void) {
   }
 }
 
-void app_log_printf(const char *fmt, ...) {
-#ifdef APP_LOG_UART
-  if (APP_LOG_UART == NULL) {
-    return;
-  }
-#endif
-  char buffer[APP_LOG_BUFFER_BYTES];
-  va_list args;
-  va_start(args, fmt);
-  int len = vsnprintf(buffer, sizeof(buffer), fmt, args);
-  va_end(args);
-
-  if (len < 0) {
-    return;
-  }
-
-  size_t bounded_len = (size_t)len;
-  if (bounded_len >= sizeof(buffer)) {
-    bounded_len = sizeof(buffer) - 1U;
-  }
-
-  app_log_uart_write((const uint8_t *)buffer, bounded_len);
-}
-
 static robot_mux_t s_mux;
 static uint8_t s_uart_rx_buffer[APP_LINK_RX_BUFFER_BYTES]
     __attribute__((section(".dma_buffer"), aligned(32)));
@@ -94,6 +70,7 @@ static size_t s_uart_rx_last_pos = 0U;
 static uint16_t s_seq_counters[ROBOT_CHANNEL_MAX + 1U] = {0};
 static uint32_t s_last_telem_ms = 0U;
 static uint32_t s_last_cmd_ms = 0U;
+static uint32_t s_last_log_ms = 0U;
 static uint32_t s_imu_seq = 0U;
 static uint32_t s_bmi_seq = 0U;
 
@@ -108,6 +85,8 @@ static void app_init(void) {
   app_link_start();
   s_last_cmd_ms = HAL_GetTick();
 
+  imu_sched_init();
+
   bool bmi_ok = imu_bmi270_init();
   if (!bmi_ok) {
     APP_LOG_ERROR("BMI270 init failed");
@@ -120,8 +99,9 @@ static void app_init(void) {
 
   if (bmi_ok && icm_ok) {
     imu_bus_set_ready(1U);
-    imu_bmi270_kick();
-    imu_icm42688_kick();
+    imu_sched_request(IMU_SCHED_SENSOR_BMI270);
+    imu_sched_request(IMU_SCHED_SENSOR_ICM42688);
+    imu_sched_run();
   } else {
     APP_LOG_ERROR("IMU bus not ready; one or more inits failed");
   }
@@ -134,49 +114,37 @@ static void app_idle_tick(void) {
     s_last_telem_ms = now;
   }
 
+  imu_sched_tick();
+
   // if ((now - s_last_cmd_ms) > APP_HEARTBEAT_TIMEOUT_MS) {
   //   APP_LOG_ERROR("Link heartbeat timeout");
   //   s_last_cmd_ms = now; // rate-limit log spam
   // }
+  if ((now - s_last_log_ms) >= APP_LOG_PERIOD_MS) {
+    s_last_log_ms = now;
+    imu_bmi270_sample_t bmi_sample;
+    if (imu_bmi270_try_get_latest(&bmi_sample, &s_bmi_seq)) {
+      APP_LOG_INFO("BMI270 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
+                   "%ld temp=%ld",
+                   (long)bmi_sample.accel[0], (long)bmi_sample.accel[1],
+                   (long)bmi_sample.accel[2], (long)bmi_sample.gyro[0],
+                   (long)bmi_sample.gyro[1], (long)bmi_sample.gyro[2],
+                   (long)bmi_sample.temperature);
+    }
 
-  imu_bmi270_poll();
-  imu_bmi270_sample_t bmi_sample;
-  if (imu_bmi270_try_get_latest(&bmi_sample, &s_bmi_seq)) {
-    APP_LOG_INFO("BMI270 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
-                 "%ld temp=%ld",
-                 (long)bmi_sample.accel[0], (long)bmi_sample.accel[1],
-                 (long)bmi_sample.accel[2], (long)bmi_sample.gyro[0],
-                 (long)bmi_sample.gyro[1], (long)bmi_sample.gyro[2],
-                 (long)bmi_sample.temperature);
-  }
-
-  imu_icm42688_poll();
-  imu_icm42688_sample_t imu_sample;
-  if (imu_icm42688_try_get_latest(&imu_sample, &s_imu_seq)) {
-    APP_LOG_INFO("ICM42688 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
-                 "%ld temp=%ld",
-                 (long)imu_sample.accel[0], (long)imu_sample.accel[1],
-                 (long)imu_sample.accel[2], (long)imu_sample.gyro[0],
-                 (long)imu_sample.gyro[1], (long)imu_sample.gyro[2],
-                 (long)imu_sample.temperature);
+    imu_icm42688_sample_t imu_sample;
+    if (imu_icm42688_try_get_latest(&imu_sample, &s_imu_seq)) {
+      APP_LOG_INFO("ICM42688 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
+                   "%ld temp=%ld",
+                   (long)imu_sample.accel[0], (long)imu_sample.accel[1],
+                   (long)imu_sample.accel[2], (long)imu_sample.gyro[0],
+                   (long)imu_sample.gyro[1], (long)imu_sample.gyro[2],
+                   (long)imu_sample.temperature);
+    }
   }
 
   HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
   HAL_Delay(APP_IDLE_TICK_MS);
-}
-
-static void app_log_uart_write(const uint8_t *data, size_t len) {
-  if (len == 0U) {
-    return;
-  }
-
-  /* Send over USB CDC (HS instance in FS PHY); fall back to USART2 on failure.
-   */
-  if (USBD_OK != CDC_Transmit_HS((uint8_t *)data, (uint16_t)len)) {
-#ifdef APP_LOG_UART
-    HAL_UART_Transmit(APP_LOG_UART, (uint8_t *)data, (uint16_t)len, 10U);
-#endif
-  }
 }
 
 static void app_link_start(void) {

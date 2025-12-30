@@ -8,6 +8,7 @@
 #include "bmi2_defs.h"
 #include "imu_bmi270_config.h"
 #include "imu_bus.h"
+#include "imu_sched.h"
 #include "main.h"
 #include "spi_bus.h"
 
@@ -26,11 +27,9 @@ extern SPI_HandleTypeDef hspi6;
 static struct bmi2_dev s_bmi;
 static spi_bus_device_t s_bmi_spi;
 static volatile uint8_t s_init_ok = 0U;
-static volatile uint8_t s_irq_pending = 0U;
 static volatile uint8_t s_dma_inflight = 0U;
 static volatile uint32_t s_sample_seq = 0U;
 static imu_bmi270_sample_t s_latest_sample;
-static uint32_t s_dma_start_ms = 0U;
 static uint8_t s_dma_fail = 0U;
 static volatile uint32_t s_irq_seen = 0U;
 static uint8_t s_irq_logged = 0U;
@@ -51,7 +50,7 @@ static void bmi_delay_us(uint32_t period, void *intf_ptr);
 static void bmi_store_sample(const imu_bmi270_sample_t *sample);
 static void bmi_parse_sample(const uint8_t *data, imu_bmi270_sample_t *sample);
 static void bmi_dma_done(void *ctx, int status);
-static void bmi_start_dma_read(void);
+static bool bmi_start_dma_read(void);
 
 static BMI2_INTF_RETURN_TYPE bmi_spi_read(uint8_t reg_addr,
                                           uint8_t *reg_data,
@@ -159,40 +158,37 @@ static void bmi_dma_done(void *ctx, int status)
         bmi_parse_sample(&s_data_rx[BMI270_DMA_RX_OFFSET], &sample);
         bmi_store_sample(&sample);
     }
-    else
-    {
-        s_irq_pending = 1U;
-    }
+    imu_sched_on_dma_done(IMU_SCHED_SENSOR_BMI270, status);
 }
 
-static void bmi_start_dma_read(void)
+static bool bmi_start_dma_read(void)
 {
     if (!s_init_ok || s_dma_inflight)
     {
-        return;
+        return false;
     }
 
     int rc = spi_bus_transfer_dma(&s_bmi_spi, s_data_tx, s_data_rx, sizeof(s_data_tx), bmi_dma_done, NULL);
     if (rc == SPI_BUS_OK)
     {
         s_dma_inflight = 1U;
-        s_dma_start_ms = HAL_GetTick();
+        return true;
     }
-    else if (rc == SPI_BUS_BUSY)
+    if (rc == SPI_BUS_BUSY)
     {
-        s_irq_pending = 1U;
+        imu_sched_request(IMU_SCHED_SENSOR_BMI270);
+        return false;
     }
-    else
+
+    imu_sched_request(IMU_SCHED_SENSOR_BMI270);
+    if (s_dma_fail < 5U)
     {
-        s_irq_pending = 1U;
-        if (s_dma_fail < 5U)
-        {
-            s_dma_fail++;
-            APP_LOG_ERROR("BMI270 DMA start failed rc=%d busy=%d state=0x%lx err=0x%lx", rc,
-                          spi_bus_is_busy(), (unsigned long)hspi6.State,
-                          (unsigned long)HAL_SPI_GetError(&hspi6));
-        }
+        s_dma_fail++;
+        APP_LOG_ERROR("BMI270 DMA start failed rc=%d busy=%d state=0x%lx err=0x%lx", rc,
+                      spi_bus_is_busy(), (unsigned long)hspi6.State,
+                      (unsigned long)HAL_SPI_GetError(&hspi6));
     }
+    return false;
 }
 
 bool imu_bmi270_init(void)
@@ -291,7 +287,6 @@ bool imu_bmi270_init(void)
     }
 
     s_init_ok = 1U;
-    s_irq_pending = 1U;
     s_dma_inflight = 0U;
     s_sample_seq = 0U;
     memset(&s_latest_sample, 0, sizeof(s_latest_sample));
@@ -313,11 +308,7 @@ void imu_bmi270_handle_int1(void)
         return;
     }
     s_irq_seen++;
-    s_irq_pending = 1U;
-    if (imu_bus_is_ready())
-    {
-        imu_bmi270_kick();
-    }
+    imu_sched_request(IMU_SCHED_SENSOR_BMI270);
 }
 
 void imu_bmi270_poll(void)
@@ -339,28 +330,16 @@ void imu_bmi270_poll(void)
         APP_LOG_ERROR("BMI270 INT1 not seen");
     }
 
-    imu_bmi270_kick();
-
-#if BMI270_CFG_DMA_TIMEOUT_MS > 0U
-    uint32_t now = HAL_GetTick();
-    if (s_dma_inflight && ((now - s_dma_start_ms) >= BMI270_CFG_DMA_TIMEOUT_MS))
-    {
-        s_dma_inflight = 0U;
-        spi_bus_abort();
-        s_irq_pending = 1U;
-        APP_LOG_ERROR("BMI270 DMA timeout, aborting");
-    }
-#endif
+    /* Diagnostics only; scheduler owns the bus. */
 }
 
-void imu_bmi270_kick(void)
+bool imu_bmi270_kick(void)
 {
-    if (!s_init_ok || s_dma_inflight || !s_irq_pending || !imu_bus_is_ready())
+    if (!s_init_ok || s_dma_inflight || !imu_bus_is_ready())
     {
-        return;
+        return false;
     }
-    s_irq_pending = 0U;
-    bmi_start_dma_read();
+    return bmi_start_dma_read();
 }
 
 bool imu_bmi270_try_get_latest(imu_bmi270_sample_t *out, uint32_t *seq)

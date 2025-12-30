@@ -22,6 +22,7 @@
 #include "usbd_cdc_if.h"
 
 /* USER CODE BEGIN INCLUDE */
+#include "log.h"
 
 /* USER CODE END INCLUDE */
 
@@ -308,8 +309,11 @@ static int8_t CDC_TransmitCplt_HS(uint8_t *Buf, uint32_t *Len, uint8_t epnum)
   uint8_t result = USBD_OK;
   /* USER CODE BEGIN 14 */
   UNUSED(Buf);
-  UNUSED(Len);
   UNUSED(epnum);
+  if (Len != NULL)
+  {
+    app_log_usb_tx_complete((uint16_t)(*Len));
+  }
   /* USER CODE END 14 */
   return result;
 }

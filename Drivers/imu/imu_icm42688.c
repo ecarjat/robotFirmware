@@ -3,9 +3,9 @@
 #include <string.h>
 
 #include "app_config.h"
-#include "imu_bmi270.h"
 #include "imu_icm42688_config.h"
 #include "imu_bus.h"
+#include "imu_sched.h"
 #include "main.h"
 #include "spi_bus.h"
 
@@ -34,15 +34,9 @@ extern SPI_HandleTypeDef hspi6;
 static spi_bus_device_t s_icm_spi;
 static volatile uint8_t s_init_ok = 0U;
 static volatile uint8_t s_dma_inflight = 0U;
-static volatile uint8_t s_irq_pending = 0U;
 static volatile uint32_t s_sample_seq = 0U;
 static imu_icm42688_sample_t s_latest_sample;
 static uint8_t s_bank = 0U;
-static uint32_t s_last_poll_ms = 0U;
-static uint32_t s_last_sample_ms = 0U;
-static uint32_t s_blocking_fail = 0U;
-static uint32_t s_blocking_ok = 0U;
-static uint32_t s_dma_start_ms = 0U;
 static uint32_t s_dma_fail = 0U;
 static volatile uint32_t s_irq_seen = 0U;
 static uint8_t s_irq_logged = 0U;
@@ -58,9 +52,8 @@ static int icm_set_bank(uint8_t bank);
 static void icm_store_sample(const imu_icm42688_sample_t *sample);
 static void icm_parse_sample(const uint8_t *data, imu_icm42688_sample_t *sample);
 static void icm_dma_done(void *ctx, int status);
-static void icm_start_dma_read(void);
+static bool icm_start_dma_read(void);
 static int icm_soft_reset(void);
-static int icm_read_blocking(imu_icm42688_sample_t *sample);
 
 static int icm_spi_read(uint8_t reg, uint8_t *buf, uint32_t len)
 {
@@ -179,65 +172,42 @@ static void icm_dma_done(void *ctx, int status)
         imu_icm42688_sample_t sample;
         icm_parse_sample(&s_data_rx[1], &sample);
         icm_store_sample(&sample);
-        s_last_sample_ms = HAL_GetTick();
     }
     else
     {
         s_dma_done_err_cnt++;
-        s_irq_pending = 1U;
     }
+    imu_sched_on_dma_done(IMU_SCHED_SENSOR_ICM42688, status);
 }
 
-static void icm_start_dma_read(void)
+static bool icm_start_dma_read(void)
 {
     if (!s_init_ok || s_dma_inflight)
     {
-        return;
+        return false;
     }
 
     int rc = spi_bus_transfer_dma(&s_icm_spi, s_data_tx, s_data_rx, sizeof(s_data_tx), icm_dma_done, NULL);
     if (rc == SPI_BUS_OK)
     {
         s_dma_inflight = 1U;
-        s_dma_start_ms = HAL_GetTick();
+        return true;
     }
-    else if (rc == SPI_BUS_BUSY)
+    if (rc == SPI_BUS_BUSY)
     {
-        s_irq_pending = 1U;
-    }
-    else
-    {
-        s_irq_pending = 1U;
-        if (s_dma_fail < 5U)
-        {
-            s_dma_fail++;
-            APP_LOG_ERROR("ICM42688 DMA start failed rc=%d busy=%d state=0x%lx err=0x%lx", rc,
-                          spi_bus_is_busy(), (unsigned long)hspi6.State,
-                          (unsigned long)HAL_SPI_GetError(&hspi6));
-        }
-    }
-}
-
-static int icm_read_blocking(imu_icm42688_sample_t *sample)
-{
-    if (sample == NULL)
-    {
-        return -1;
+        imu_sched_request(IMU_SCHED_SENSOR_ICM42688);
+        return false;
     }
 
-    uint8_t tx[ICM42688_DATA_FRAME_LEN];
-    uint8_t rx[ICM42688_DATA_FRAME_LEN];
-    memset(tx, 0, sizeof(tx));
-    tx[0] = (uint8_t)(ICM42688_REG_TEMP_DATA1 | ICM42688_SPI_READ_MASK);
-
-    int rc = spi_bus_transfer_blocking(&s_icm_spi, tx, rx, sizeof(tx), ICM42688_REG_TIMEOUT_MS);
-    if (rc != 0)
+    imu_sched_request(IMU_SCHED_SENSOR_ICM42688);
+    if (s_dma_fail < 5U)
     {
-        return rc;
+        s_dma_fail++;
+        APP_LOG_ERROR("ICM42688 DMA start failed rc=%d busy=%d state=0x%lx err=0x%lx", rc,
+                      spi_bus_is_busy(), (unsigned long)hspi6.State,
+                      (unsigned long)HAL_SPI_GetError(&hspi6));
     }
-
-    icm_parse_sample(&rx[1], sample);
-    return 0;
+    return false;
 }
 
 bool imu_icm42688_init(void)
@@ -331,7 +301,6 @@ bool imu_icm42688_init(void)
 
     s_init_ok = 1U;
     s_dma_inflight = 0U;
-    s_irq_pending = 1U;
     s_sample_seq = 0U;
     memset(&s_latest_sample, 0, sizeof(s_latest_sample));
     s_irq_seen = 0U;
@@ -350,23 +319,18 @@ void imu_icm42688_handle_int1(void)
         return;
     }
     s_irq_seen++;
-    s_irq_pending = 1U;
-    if (imu_bus_is_ready())
-    {
-        imu_icm42688_kick();
-    }
+    imu_sched_request(IMU_SCHED_SENSOR_ICM42688);
 }
 
-void imu_icm42688_kick(void)
+bool imu_icm42688_kick(void)
 {
-    if (!s_init_ok || s_dma_inflight || !s_irq_pending || !imu_bus_is_ready())
+    if (!s_init_ok || s_dma_inflight || !imu_bus_is_ready())
     {
         s_kick_blocked_cnt++;
-        return;
+        return false;
     }
     s_kick_cnt++;
-    s_irq_pending = 0U;
-    icm_start_dma_read();
+    return icm_start_dma_read();
 }
 
 static uint32_t s_diag_last_ms = 0U;
@@ -399,65 +363,13 @@ void imu_icm42688_poll(void)
     if ((now_diag - s_diag_last_ms) >= 500U)
     {
         s_diag_last_ms = now_diag;
-        APP_LOG_INFO("ICM diag: poll=%lu irq=%lu pend=%u infl=%u kick=%lu blk=%lu done=%lu err=%lu",
+        APP_LOG_INFO("ICM diag: poll=%lu irq=%lu infl=%u kick=%lu blk=%lu done=%lu err=%lu",
                      (unsigned long)s_poll_cnt,
-                     (unsigned long)s_irq_seen, s_irq_pending, s_dma_inflight,
+                     (unsigned long)s_irq_seen, s_dma_inflight,
                      (unsigned long)s_kick_cnt, (unsigned long)s_kick_blocked_cnt,
                      (unsigned long)s_dma_done_cnt, (unsigned long)s_dma_done_err_cnt);
     }
-
-    imu_icm42688_kick();
-
-#if (ICM42688_CFG_FALLBACK_POLL_MS > 0U) || (ICM42688_CFG_DMA_TIMEOUT_MS > 0U) || \
-    (ICM42688_CFG_FALLBACK_BLOCKING_MS > 0U)
-    uint32_t now = HAL_GetTick();
-#endif
-
-#if ICM42688_CFG_FALLBACK_POLL_MS > 0U
-    if ((now - s_last_poll_ms) >= ICM42688_CFG_FALLBACK_POLL_MS)
-    {
-        s_last_poll_ms = now;
-        icm_start_dma_read();
-    }
-#endif
-
-#if ICM42688_CFG_DMA_TIMEOUT_MS > 0U
-    if (s_dma_inflight && ((now - s_dma_start_ms) >= ICM42688_CFG_DMA_TIMEOUT_MS))
-    {
-        s_dma_inflight = 0U;
-        spi_bus_abort();
-        s_irq_pending = 1U;
-        APP_LOG_ERROR("ICM42688 DMA timeout, aborting");
-    }
-#endif
-
-#if ICM42688_CFG_FALLBACK_BLOCKING_MS > 0U
-    if (!s_dma_inflight && ((now - s_last_sample_ms) >= ICM42688_CFG_FALLBACK_BLOCKING_MS))
-    {
-        imu_icm42688_sample_t sample;
-        int rc = icm_read_blocking(&sample);
-        if (rc == 0)
-        {
-            icm_store_sample(&sample);
-            s_last_sample_ms = now;
-            if (s_blocking_ok < 3U)
-            {
-                s_blocking_ok++;
-                APP_LOG_INFO("ICM42688 blocking read ok");
-            }
-            s_blocking_fail = 0U;
-        }
-        else
-        {
-            if (s_blocking_fail < 5U)
-            {
-                s_blocking_fail++;
-                APP_LOG_ERROR("ICM42688 blocking read failed rc=%d busy=%d", rc,
-                              spi_bus_is_busy());
-            }
-        }
-    }
-#endif
+    /* Diagnostics only; scheduler owns the bus. */
 }
 
 bool imu_icm42688_try_get_latest(imu_icm42688_sample_t *out, uint32_t *seq)

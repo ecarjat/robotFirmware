@@ -49,11 +49,13 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     common/framing_cobs.c
     common/mux_channels.c
     common/shared_protocol/robot_protocol.c
+    utils/log.c
     drivers/imu/imu_bus.c
     drivers/imu/imu_bmi270.c
     drivers/imu/imu_icm42688.c
     drivers/imu/imu_exti.c
     drivers/imu/imu_bus_sched.c
+    drivers/imu/imu_sched.c
     drivers/spi_bus.c
     libs/BMI270_SensorAPI/bmi2.c
     libs/BMI270_SensorAPI/bmi270.c
@@ -66,6 +68,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     common/shared_protocol
     drivers
     drivers/imu
+    utils
     libs/BMI270_SensorAPI
 )
 
