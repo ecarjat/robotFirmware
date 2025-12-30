@@ -17,7 +17,7 @@ Primary goal: Port an existing ESP32 codebase (motors + sensors + logging + esti
 
 ### 0.2 Target state (destination)
 - **STM32H723 (WeAct board)** is the real-time robot brain:
-  - IMUs (BMI270 primary on I2C1, ICM-45686 secondary + BMM150 on I2C2)
+  - IMUs (BMI270 on I2C1, ICM-42688 on SPI6, BMM150 on I2C2)
   - TFmini Plus LiDARs (UART)
   - motor nodes (UART to each driver board)
   - on-board SDMMC + TFT + QSPI
@@ -171,8 +171,8 @@ firmware/
     imu/
       imu_bmi270.c
       imu_bmi270.h
-      imu_icm45686.c
-      imu_icm45686.h
+      imu_icm42688.c
+      imu_icm42688.h
       mag_bmm150.c
       mag_bmm150.h
     lidar/
@@ -272,7 +272,7 @@ Acceptance:
 
 ### Phase 2 — Sensors on STM32
 Implement:
-- I2C IMU drivers (BMI270 primary; ICM-45686 secondary)
+- IMU drivers (BMI270 on I2C1; ICM-42688 on SPI6)
 - Mag driver (BMM150)
 - TFmini UART parser for 3 LiDARs
 
@@ -326,7 +326,7 @@ Codex must implement a deterministic scheduler model:
 - TIM 1kHz ISR: sets `control_tick_flag`
 - Main loop:
   - `poll_uart_links()` (DMA-driven)
-  - `poll_sensors()` (I2C reads scheduled; DRDY optionally)
+  - `poll_sensors()` (SPI/I2C reads scheduled; ICM-42688 via SPI DMA on DRDY)
   - `if(control_tick_flag) run_control_tick_1khz()`
   - `run_ui_tick_20hz()`
   - `run_logger_tick()` (non-blocking)
@@ -373,6 +373,7 @@ Codex must provide a runnable test runner on STM32:
   - `test sd`
   - `test qspi`
   - `test i2c`
+  - `test spi_imu`
   - `test motors`
   - `test lidar`
 

@@ -11,7 +11,7 @@ Concrete, conflict-free pin/port mapping for the robot architecture:
 
 Constraints:
 - Do not reuse pins consumed by **on-board TFT**, **microSD**, **USB FS**, **QSPI flash**, **SWD**.
-- Use **two separate I2C buses** for IMUs/mag.
+- Use I2C for BMI270 + BMM150; ICM42688 is on SPI6.
 - Use **UART for all 3 TFmini Plus**.
 - Use **4 dedicated UART links** for 4 motor driver nodes.
 - Use **1 UART spine** between STM32 and ESP32 @ 921600 + optional RTS/CTS.
@@ -61,7 +61,7 @@ Source: Board schematic (WeAct STM32H7xx V1.2).  [oai_citation:0‡STM32H7xx Sch
 
 ---
 
-## 2) I2C Buses (split IMUs across two buses)
+## 2) I2C Buses (BMI270 + BMM150)
 ### 2.1 I2C1 — Primary IMU bus (cleanest, highest priority)
 - PB8 = I2C1_SCL
 - PB7 = I2C1_SDA  
@@ -72,21 +72,30 @@ Devices on I2C1:
 Suggested interrupts (EXTI-capable GPIOs; can be changed):
 - PC3 = BMI270_INT1
 
-### 2.2 I2C2 — Secondary IMU + Magnetometer bus
+### 2.2 I2C2 — Magnetometer bus
 - PB10 = I2C2_SCL (set AF in CubeMX)
 - PB11 = I2C2_SDA (set AF in CubeMX)
 
 Devices on I2C2:
-- **ICM-45686 (IMU #2, SECONDARY)**
 - **BMM150  (Magnetometer)**
-
-Suggested interrupts:
-- PC0 = ICM45686_INT1
-- PC2 = ICM45686_INT2
 
 Electrical:
 - Each I2C bus has its own pull-ups to 3.3V (start 2.2k–4.7k).
 - Start at 400 kHz; drop to 100 kHz if errors.
+
+### 2.3 SPI6 — ICM42688 IMU (SPI)
+- PA5 = SPI6_SCK
+- PA6 = SPI6_MISO
+- PA7 = SPI6_MOSI
+- PD15 = ICM42688_CS
+
+Interrupts:
+- PC0 = ICM42688_INT1
+- PC2 = ICM42688_INT2
+
+Notes:
+- SPI mode 3; DMA on RX/TX.
+- All IMUs/magnetometer on SPI must use the shared SPI bus layer for mutual exclusion + CS timing.
 
 ---
 

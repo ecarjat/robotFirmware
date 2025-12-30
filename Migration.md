@@ -42,10 +42,10 @@ Motor communication is defined here and must be preserved:
 ## 3) Hardware Scope & Buses
 ### 3.1 External devices (STM32 side)
 - 3× TFmini Plus LiDAR: front, back, down (UART)
-- 2× IMU + 1× magnetometer (I2C)
-  - ICM-45686 (IMU)
-  - BMI270 (IMU)
-  - BMM150 (mag)
+- 2× IMU + 1× magnetometer
+  - ICM-42688 (IMU, SPI6)
+  - BMI270 (IMU, I2C1)
+  - BMM150 (mag, I2C2)
 - 4× motor drivers (SimpleFOC nodes, UART)
 - dual-color status LED (2 GPIO)
 - buttons (define set; see §8)
@@ -71,7 +71,7 @@ Motor communication is defined here and must be preserved:
 
 2) **stm32/** (robot brain):
    - UART DMA drivers for all UART links
-   - I2C drivers for IMU/mag
+   - SPI/I2C drivers for IMU/mag
    - motor comm manager (port of existing ESP32 motor comm logic)
    - LiDAR drivers (TFmini)
    - logging service (SD)
@@ -146,8 +146,9 @@ Motor communication is defined here and must be preserved:
   - cliff/height gating (down)
 
 ### 6.4 IMUs + magnetometer
-- I2C1: IMU bus (ICM-45686 + BMI270)
+- I2C1: IMU bus (BMI270)
 - I2C2: magnetometer bus (BMM150)
+- SPI6: IMU bus (ICM-42688)
 - interrupt lines from IMUs preferred (DRDY -> EXTI)
 - publish fused or redundant IMU data to estimator inputs (existing estimator decides usage)
 
@@ -275,7 +276,7 @@ ESP32 provides transport only. STM32 owns flashing logic (bootloader or in-app u
 - Add motor status telemetry
 
 ### Phase 3 — Sensors
-- Add IMU I2C reads + timestamps
+- Add IMU SPI/I2C reads + timestamps
 - Add LiDAR UART parsing
 - Feed existing estimator inputs
 

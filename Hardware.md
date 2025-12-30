@@ -8,7 +8,7 @@ This document describes the **hardware wiring and MCU port mapping** for the rob
 - **External peripherals:**
   - 3× TFmini Plus LiDAR (Front / Back / Down)
   - 2× IMU + 1× magnetometer:
-    - **ICM-45686** (IMU)
+    - **ICM-42688** (IMU)
     - **BMI270** (IMU)
     - **BMM150** (magnetometer)
   - 4× motor driver nodes (each runs SimpleFOC; UART link to brain)
@@ -24,7 +24,7 @@ This document describes the **hardware wiring and MCU port mapping** for the rob
 ### 1.1 Rails
 - **3.3V rail**
   - STM32H723 board logic
-  - IMUs (ICM-45686, BMI270), magnetometer (BMM150)
+  - IMUs (ICM-42688, BMI270), magnetometer (BMM150)
   - ESP32 module (3.3V)
   - Status LED (through resistors)
   - Buttons (GPIO pull-ups)
@@ -48,12 +48,12 @@ This document describes the **hardware wiring and MCU port mapping** for the rob
 - (Optional) 1× debug UART (recommended if available)
 
 ### 2.2 I2C Buses
-- I2C1: IMU bus (high-rate, clean)
-- I2C2: magnetometer bus (lower-rate, isolated)
+- I2C1: BMI270 IMU bus (high-rate, clean)
+- I2C2: BMM150 magnetometer bus (lower-rate, isolated)
 
 ### 2.3 SPI
 - On-board TFT and on-board SD card use SPI/SDMMC resources (already wired).
-- Do not allocate external sensors to the same SPI bus unless necessary.
+- SPI6 is allocated to the ICM42688 IMU (shared SPI bus layer for sensors).
 
 ---
 
@@ -102,13 +102,17 @@ Use short wires, good pull-ups, and keep IMU bus isolated from noisy devices.
 **Speed:** 400 kHz (safe) or 1 MHz (if wiring supports)  
 **Recommended:** route each IMU **INT** pin to a dedicated EXTI GPIO.
 
-#### I2C2 — Secondary IMU + Magnetometer Bus
+#### I2C2 — Magnetometer Bus
 | Device | Type | Bus | Notes |
 |---|---|---|---|
-| ICM-45686 | 6-axis IMU | I2C2 | Secondary IMU for redundancy/fusion |
 | BMM150 | Magnetometer | I2C2 | Heading/yaw reference; lower rate |
 
 **Speed:** 100–400 kHz
+
+#### SPI6 — IMU Bus
+| Device | Type | Bus | Notes |
+|---|---|---|---|
+| ICM-42688 | 6-axis IMU | SPI6 | SPI mode 3, INT1 via EXTI |
 
 ---
 
@@ -198,8 +202,9 @@ Do not reassign the pins/peripherals consumed by these on-board devices.
 
 ## 8) Bring-up Checklist
 1. Power rails stable: 3.3V clean; 5V LiDAR rail capable of peak current.
-2. Verify IMU I2C1 communication; validate INT lines.
-3. Verify magnetometer I2C2 communication.
+2. Verify BMI270 I2C1 communication; validate INT lines.
+3. Verify ICM-42688 SPI6 communication.
+4. Verify magnetometer I2C2 communication.
 4. Verify each LiDAR UART receives valid frames (one at a time).
 5. Verify motor node UART handshake (one at a time).
 6. Bring up ESP32 UART link (basic packet echo) before Bluepad32 integration.

@@ -96,16 +96,16 @@ Parsing is NOT done in ISR.
 
 ## 4) Data Flow by Subsystem
 
-### 4.1 IMU Sampling (ICM-45686 + BMI270)
+### 4.1 IMU Sampling (ICM-42688 + BMI270)
 Preferred model:
 - IMU provides data-ready interrupt at fixed rate (e.g., 1 kHz)
 - EXTI ISR sets `imu1_drdy = true` / `imu2_drdy = true`
-- Main loop executes the I2C read as soon as possible (fast path), stores into `latestImu{1,2}` + timestamp
+- Main loop kicks ICM42688 SPI DMA read on INT1 and reads BMI270 over I2C, stores into `latestImu{1,2}` + timestamp
 - Control tick uses the latest available IMU data (with freshness checks)
 
-If I2C reads are too slow:
+If reads are too slow:
 - Reduce IMU ODR to 500 Hz
-- Or switch to SPI later (not required initially)
+- Ensure SPI DMA buffers are cache-safe and use the shared SPI bus layer
 
 ### 4.2 Magnetometer (BMM150)
 - Read at 25–100 Hz (timer in main loop)

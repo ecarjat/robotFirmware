@@ -49,6 +49,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     common/framing_cobs.c
     common/mux_channels.c
     common/shared_protocol/robot_protocol.c
+    drivers/imu/imu_icm42688.c
+    drivers/spi_bus.c
 )
 
 # Add include paths
@@ -56,6 +58,8 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     app
     common
     common/shared_protocol
+    drivers
+    drivers/imu
 )
 
 # Add project symbols (macros)

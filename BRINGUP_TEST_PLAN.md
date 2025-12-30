@@ -1,4 +1,4 @@
-# BRINGUP_TEST_PLAN.md — Codex-ready STM32H723 Bring-up Plan (WeAct H723 + USB CDC + SDMMC + QSPI + I2C + UART)
+# BRINGUP_TEST_PLAN.md — Codex-ready STM32H723 Bring-up Plan (WeAct H723 + USB CDC + SDMMC + QSPI + I2C + SPI + UART)
 Version: 1.0
 Target: WeAct STM32H723VGT6 board
 Clock: HSE 25MHz (PH0/PH1) → PLL1 (SYSCLK), PLL3Q (USB 48MHz), PLL2R (SDMMC kernel)
@@ -24,7 +24,8 @@ Goal: Produce a deterministic, stepwise bring-up firmware that validates each su
 - QSPI flash is on-board (W25Q64).
 - IMUs connected:
   - I2C1: BMI270 (see `Pinmap.md` for wiring)
-  - I2C2: ICM-45686 + BMM150 (see `Pinmap.md` for wiring)
+  - I2C2: BMM150 (see `Pinmap.md` for wiring)
+  - SPI6: ICM-42688 (see `Pinmap.md` for wiring)
 - ESP32 may be disconnected for early phases.
 - Motors and LiDARs disconnected for early phases (reduce noise, simplify).
 
@@ -36,7 +37,8 @@ Create separate build-time modes to reduce complexity:
 - BUILD_MODE_USB: USB CDC console
 - BUILD_MODE_SD: SDMMC + FATFS
 - BUILD_MODE_QSPI: QSPI JEDEC + read/write
-- BUILD_MODE_I2C: I2C scan + sensor ID reads
+- BUILD_MODE_I2C: I2C scan + BMI270/BMM150 ID reads
+- BUILD_MODE_SPI_IMU: SPI6 ICM-42688 WHOAMI + data read
 - BUILD_MODE_UART: UART loopbacks / basic framing
 - BUILD_MODE_INTEGRATION: combined sanity suite
 
@@ -81,8 +83,9 @@ C4. FATFS mount + create/write/read file
 
 ### Phase D — Sensors
 D1. I2C1 scan + BMI270 WHOAMI
-D2. I2C2 scan + ICM-45686 WHOAMI + BMM150 ID
-D3. IMU DRDY EXTI line toggling (optional)
+D2. I2C2 scan + BMM150 ID
+D3. SPI6 ICM-42688 WHOAMI
+D4. IMU DRDY EXTI line toggling (optional)
 
 ### Phase E — Serial Links
 E1. ESP32 spine UART (framing sanity)
@@ -90,7 +93,7 @@ E2. Motor UART links (per-node ping)
 E3. LiDAR UART parsing (per sensor)
 
 ### Phase F — Integration
-F1. All enabled simultaneously (USB + SD + QSPI + I2C + UART2)
+F1. All enabled simultaneously (USB + SD + QSPI + I2C + SPI + UART2)
 F2. Background logging while reading sensors
 F3. File download primitive over USB (read chunk test)
 
@@ -233,19 +236,32 @@ Mitigation:
 
 ---
 
-### D2) I2C2 Scan + ICM-45686 + BMM150 IDs
+### D2) I2C2 Scan + BMM150 ID
 Procedure:
 1) scan I2C2
-2) read ICM-45686 WHOAMI
-3) read BMM150 chip ID
+2) read BMM150 chip ID
 PASS:
-- both devices found, IDs correct
+- device found, ID correct
 Mitigation:
 - ensure each bus has its own pullups
 
 ---
 
-### D3) IMU DRDY EXTI Toggle (Optional)
+### D3) SPI6 ICM-42688 WHOAMI
+Purpose: validate SPI6 wiring + IMU ID.
+Procedure:
+1) read ICM-42688 WHO_AM_I over SPI6
+2) optionally read TEMP/ACC/GYRO burst once
+PASS:
+- WHO_AM_I = 0x47
+FAIL:
+- 0x00/0xFF or timeout
+Mitigation:
+- verify CS/MISO/MOSI/SCK, SPI mode 3, and power/reset
+
+---
+
+### D4) IMU DRDY EXTI Toggle (Optional)
 Purpose: validate GPIO EXTI wiring and edge trigger.
 Procedure:
 1) configure EXTI for BMI270 INT pin
@@ -344,7 +360,7 @@ System passes bring-up when:
 - USB CDC enumerates and stays stable for 10 minutes
 - SD FATFS R/W passes and survives reset
 - QSPI JEDEC + R/W passes
-- Both I2C buses find their sensors with correct IDs
+- I2C1 BMI270 ID OK, I2C2 BMM150 ID OK, SPI6 ICM-42688 ID OK
 - UART2 at 921600 is stable
 - Timer 1kHz stable
 - No HardFaults, no brownouts under integration stress
@@ -361,9 +377,10 @@ Codex must generate:
 5) `bringup/tests/test_qspi_w25q64.c`
 6) `bringup/tests/test_sdmmc_fatfs.c`
 7) `bringup/tests/test_i2c_scan.c` (I2C1 + I2C2)
-8) `bringup/tests/test_exti_imu.c` (optional)
-9) `bringup/tests/test_uart_links.c` (ESP32/motors/lidars skeletons)
-10) `bringup/host_tools/` (optional)
+8) `bringup/tests/test_spi_imu.c` (ICM-42688 WHO_AM_I)
+9) `bringup/tests/test_exti_imu.c` (optional)
+10) `bringup/tests/test_uart_links.c` (ESP32/motors/lidars skeletons)
+11) `bringup/host_tools/` (optional)
    - small python script to open ttyACM0 and run LIST/READ_CHUNK tests
 
 Each test must compile independently and be callable from `main()` via `BRINGUP_MODE`.

@@ -1131,14 +1131,14 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOB, LED_RED_Pin|LED_GREEN_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, BMM150_CS_Pin|BMI270_CS_Pin|ICM45686_CS_Pin|SPI_FLASH_CS_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOD, BMM150_CS_Pin|BMI270_CS_Pin|ICM42688_CS_Pin|SPI_FLASH_CS_Pin, GPIO_PIN_SET);
 
-  /*Configure GPIO pins : BL_LED_Pin LCD_CS_Pin LVCD_WS_RS_Pin */
-  GPIO_InitStruct.Pin = BL_LED_Pin|LCD_CS_Pin|LVCD_WS_RS_Pin;
+  /*Configure GPIO pin : BL_LED_Pin */
+  GPIO_InitStruct.Pin = BL_LED_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+  HAL_GPIO_Init(BL_LED_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : BTN2_Pin BTN3_Pin BTN5_Pin */
   GPIO_InitStruct.Pin = BTN2_Pin|BTN3_Pin|BTN5_Pin;
@@ -1152,8 +1152,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(SW2_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : ICM45686_INT1_Pin ICM45686_INT2_Pin BMI270_INT1_Pin */
-  GPIO_InitStruct.Pin = ICM45686_INT1_Pin|ICM45686_INT2_Pin|BMI270_INT1_Pin;
+  /*Configure GPIO pins : ICM42688_INT1_Pin BMI270_INT1_Pin BMM150_INT1_Pin */
+  GPIO_InitStruct.Pin = ICM42688_INT1_Pin|BMI270_INT1_Pin|BMM150_INT1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
@@ -1177,8 +1177,15 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : BMM150_CS_Pin BMI270_CS_Pin ICM45686_CS_Pin SPI_FLASH_CS_Pin */
-  GPIO_InitStruct.Pin = BMM150_CS_Pin|BMI270_CS_Pin|ICM45686_CS_Pin|SPI_FLASH_CS_Pin;
+  /*Configure GPIO pins : LCD_CS_Pin LVCD_WS_RS_Pin */
+  GPIO_InitStruct.Pin = LCD_CS_Pin|LVCD_WS_RS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : BMM150_CS_Pin BMI270_CS_Pin ICM42688_CS_Pin SPI_FLASH_CS_Pin */
+  GPIO_InitStruct.Pin = BMM150_CS_Pin|BMI270_CS_Pin|ICM42688_CS_Pin|SPI_FLASH_CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
@@ -1191,14 +1198,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(MICROSD_SW_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(ICM45686_INT1_EXTI_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(ICM45686_INT1_EXTI_IRQn);
-
-  HAL_NVIC_SetPriority(ICM45686_INT2_EXTI_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(ICM45686_INT2_EXTI_IRQn);
-
-  HAL_NVIC_SetPriority(BMI270_INT1_EXTI_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(BMI270_INT1_EXTI_IRQn);
+  HAL_NVIC_SetPriority(ICM42688_INT1_EXTI_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(ICM42688_INT1_EXTI_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

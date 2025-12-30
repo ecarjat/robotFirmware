@@ -8,7 +8,7 @@
 #include "app_main.h"
 #include "crc32.h"
 #include "framing_cobs.h"
-#include "imu_icm45686.h"
+#include "imu_icm42688.h"
 #include "mux_channels.h"
 #include "shared_protocol/robot_protocol.h"
 #include "stm32h7xx_hal.h"
@@ -84,13 +84,15 @@ void app_log_printf(const char *fmt, ...) {
 }
 
 static robot_mux_t s_mux;
-static uint8_t s_uart_rx_buffer[APP_LINK_RX_BUFFER_BYTES] __attribute__((section(".dma_buffer"), aligned(32)));
+static uint8_t s_uart_rx_buffer[APP_LINK_RX_BUFFER_BYTES]
+    __attribute__((section(".dma_buffer"), aligned(32)));
 static uint8_t s_cobs_frame_buffer[APP_LINK_FRAME_BUFFER_BYTES];
 static size_t s_cobs_frame_len = 0U;
 static size_t s_uart_rx_last_pos = 0U;
 static uint16_t s_seq_counters[ROBOT_CHANNEL_MAX + 1U] = {0};
 static uint32_t s_last_telem_ms = 0U;
 static uint32_t s_last_cmd_ms = 0U;
+static uint32_t s_imu_seq = 0U;
 
 static void app_init(void) {
   HAL_Delay(5000);
@@ -103,10 +105,9 @@ static void app_init(void) {
   app_link_start();
   s_last_cmd_ms = HAL_GetTick();
 
-  // if (!imu_icm45686_init())
-  // {
-  //     APP_LOG_ERROR("ICM45686 init failed");
-  // }
+  if (!imu_icm42688_init()) {
+    APP_LOG_ERROR("ICM45686 init failed");
+  }
 }
 
 static void app_idle_tick(void) {
@@ -121,20 +122,16 @@ static void app_idle_tick(void) {
     s_last_cmd_ms = now; // rate-limit log spam
   }
 
-  // imu_icm45686_poll();
-  // imu_icm45686_sample_t imu_sample;
-  // if (imu_icm45686_try_get_latest(&imu_sample, &s_imu_seq))
-  // {
-  //     APP_LOG_INFO("ICM45686 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,
-  //     %ld, %ld temp=%ld",
-  //                  (long)imu_sample.accel[0],
-  //                  (long)imu_sample.accel[1],
-  //                  (long)imu_sample.accel[2],
-  //                  (long)imu_sample.gyro[0],
-  //                  (long)imu_sample.gyro[1],
-  //                  (long)imu_sample.gyro[2],
-  //                  (long)imu_sample.temperature);
-  // }
+  imu_icm42688_poll();
+  imu_icm42688_sample_t imu_sample;
+  if (imu_icm42688_try_get_latest(&imu_sample, &s_imu_seq)) {
+    APP_LOG_INFO("ICM45686 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
+                 "%ld temp=%ld",
+                 (long)imu_sample.accel[0], (long)imu_sample.accel[1],
+                 (long)imu_sample.accel[2], (long)imu_sample.gyro[0],
+                 (long)imu_sample.gyro[1], (long)imu_sample.gyro[2],
+                 (long)imu_sample.temperature);
+  }
 
   HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
   HAL_Delay(APP_IDLE_TICK_MS);
@@ -268,8 +265,8 @@ static void app_link_log_bytes(const char *label, const uint8_t *data,
     if ((size_t)written >= sizeof(line)) {
       break;
     }
-    int ret = snprintf(line + written, sizeof(line) - (size_t)written,
-                       " %02X", data[i]);
+    int ret = snprintf(line + written, sizeof(line) - (size_t)written, " %02X",
+                       data[i]);
     if (ret < 0) {
       break;
     }
@@ -353,8 +350,7 @@ static void app_link_debug_frame(const uint8_t *frame, size_t len) {
     APP_LOG_ERROR("Frame debug: crc rx=0x%08lx calc=0x%08lx",
                   (unsigned long)crc_rx, (unsigned long)crc_calc);
   } else {
-    APP_LOG_ERROR("Frame debug: crc ok 0x%08lx",
-                  (unsigned long)crc_rx);
+    APP_LOG_ERROR("Frame debug: crc ok 0x%08lx", (unsigned long)crc_rx);
   }
 #else
   (void)frame;
