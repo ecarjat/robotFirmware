@@ -153,6 +153,13 @@ static int spi_bus_apply_config(const spi_bus_device_t *dev)
 
 static void spi_bus_finish(int status)
 {
+    __disable_irq();
+    if (!s_bus.busy)
+    {
+        __enable_irq();
+        return;
+    }
+
     spi_bus_done_cb_t cb = s_bus.cb;
     void *cb_ctx = s_bus.cb_ctx;
     spi_bus_device_t *dev = s_bus.active_dev;
@@ -166,6 +173,7 @@ static void spi_bus_finish(int status)
     s_bus.rx = NULL;
     s_bus.len = 0U;
     s_bus.busy = 0U;
+    __enable_irq();
 
     spi_bus_deassert_cs(dev);
     spi_bus_cache_invalidate(rx, len);
@@ -237,17 +245,17 @@ int spi_bus_transfer_dma(spi_bus_device_t *dev,
     {
         return SPI_BUS_ARG;
     }
-    if (s_bus.busy)
+    if (__LDREXB(&s_bus.busy) || __STREXB(1U, &s_bus.busy))
     {
         return SPI_BUS_BUSY;
     }
 
     if (spi_bus_apply_config(dev) != SPI_BUS_OK)
     {
+        s_bus.busy = 0U;
         return SPI_BUS_ERR;
     }
 
-    s_bus.busy = 1U;
     s_bus.active_dev = dev;
     s_bus.tx = tx;
     s_bus.rx = rx;
@@ -362,8 +370,10 @@ int spi_bus_is_busy(void)
 
 void spi_bus_abort(void)
 {
+    __disable_irq();
     if (!s_bus.busy || s_bus.hspi == NULL)
     {
+        __enable_irq();
         return;
     }
 
@@ -372,6 +382,7 @@ void spi_bus_abort(void)
     spi_bus_device_t *dev = s_bus.active_dev;
     uint8_t *rx = s_bus.rx;
     size_t len = s_bus.len;
+    SPI_HandleTypeDef *hspi = s_bus.hspi;
 
     s_bus.cb = NULL;
     s_bus.cb_ctx = NULL;
@@ -380,11 +391,12 @@ void spi_bus_abort(void)
     s_bus.rx = NULL;
     s_bus.len = 0U;
     s_bus.busy = 0U;
+    __enable_irq();
 
     spi_bus_deassert_cs(dev);
     spi_bus_cache_invalidate(rx, len);
 
-    (void)HAL_SPI_Abort(s_bus.hspi);
+    (void)HAL_SPI_Abort(hspi);
 
     if (cb != NULL)
     {

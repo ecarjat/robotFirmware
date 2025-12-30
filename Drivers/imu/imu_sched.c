@@ -153,11 +153,15 @@ void imu_sched_on_dma_done(imu_sched_sensor_t sensor, int status)
     {
         return;
     }
+
+    __disable_irq();
     s_last_served_ms[sensor] = HAL_GetTick();
     if (s_active_sensor == (int8_t)sensor)
     {
         s_active_sensor = -1;
     }
+    __enable_irq();
+
     if (status != 0)
     {
         imu_sched_set_pending(sensor, HAL_GetTick());
@@ -170,11 +174,10 @@ void imu_sched_run(void)
     {
         return;
     }
-    if (s_running)
+    if (__LDREXB(&s_running) || __STREXB(1U, &s_running))
     {
         return;
     }
-    s_running = 1U;
 
     uint32_t pending = s_pending_mask;
     if (pending == 0U)
@@ -235,7 +238,11 @@ void imu_sched_tick(void)
         return;
     }
 
+    __disable_irq();
     int8_t active = s_active_sensor;
+    uint32_t start_ms = s_active_start_ms;
+    __enable_irq();
+
     if (active < 0 || active >= (int8_t)IMU_SCHED_SENSOR_COUNT)
     {
         return;
@@ -248,7 +255,7 @@ void imu_sched_tick(void)
     }
 
     uint32_t now_ms = HAL_GetTick();
-    if ((now_ms - s_active_start_ms) < timeout_ms)
+    if ((now_ms - start_ms) < timeout_ms)
     {
         return;
     }

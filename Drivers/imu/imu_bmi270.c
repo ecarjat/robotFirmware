@@ -163,7 +163,11 @@ static void bmi_dma_done(void *ctx, int status)
 
 static bool bmi_start_dma_read(void)
 {
-    if (!s_init_ok || s_dma_inflight)
+    if (!s_init_ok)
+    {
+        return false;
+    }
+    if (__LDREXB(&s_dma_inflight) || __STREXB(1U, &s_dma_inflight))
     {
         return false;
     }
@@ -171,9 +175,9 @@ static bool bmi_start_dma_read(void)
     int rc = spi_bus_transfer_dma(&s_bmi_spi, s_data_tx, s_data_rx, sizeof(s_data_tx), bmi_dma_done, NULL);
     if (rc == SPI_BUS_OK)
     {
-        s_dma_inflight = 1U;
         return true;
     }
+    s_dma_inflight = 0U;
     if (rc == SPI_BUS_BUSY)
     {
         imu_sched_request(IMU_SCHED_SENSOR_BMI270);
