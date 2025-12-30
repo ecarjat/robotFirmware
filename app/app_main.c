@@ -8,6 +8,8 @@
 #include "app_main.h"
 #include "crc32.h"
 #include "framing_cobs.h"
+#include "imu_bmi270.h"
+#include "imu_bus.h"
 #include "imu_icm42688.h"
 #include "mux_channels.h"
 #include "shared_protocol/robot_protocol.h"
@@ -93,9 +95,10 @@ static uint16_t s_seq_counters[ROBOT_CHANNEL_MAX + 1U] = {0};
 static uint32_t s_last_telem_ms = 0U;
 static uint32_t s_last_cmd_ms = 0U;
 static uint32_t s_imu_seq = 0U;
+static uint32_t s_bmi_seq = 0U;
 
 static void app_init(void) {
-  HAL_Delay(5000);
+  HAL_Delay(2000);
   robot_mux_init(&s_mux);
   robot_mux_register(&s_mux, ROBOT_CHANNEL_CMD, app_cmd_handler, NULL);
 
@@ -105,8 +108,22 @@ static void app_init(void) {
   app_link_start();
   s_last_cmd_ms = HAL_GetTick();
 
-  if (!imu_icm42688_init()) {
-    APP_LOG_ERROR("ICM45686 init failed");
+  bool bmi_ok = imu_bmi270_init();
+  if (!bmi_ok) {
+    APP_LOG_ERROR("BMI270 init failed");
+  }
+
+  bool icm_ok = imu_icm42688_init();
+  if (!icm_ok) {
+    APP_LOG_ERROR("ICM42688 init failed");
+  }
+
+  if (bmi_ok && icm_ok) {
+    imu_bus_set_ready(1U);
+    imu_bmi270_kick();
+    imu_icm42688_kick();
+  } else {
+    APP_LOG_ERROR("IMU bus not ready; one or more inits failed");
   }
 }
 
@@ -117,15 +134,26 @@ static void app_idle_tick(void) {
     s_last_telem_ms = now;
   }
 
-  if ((now - s_last_cmd_ms) > APP_HEARTBEAT_TIMEOUT_MS) {
-    APP_LOG_ERROR("Link heartbeat timeout");
-    s_last_cmd_ms = now; // rate-limit log spam
+  // if ((now - s_last_cmd_ms) > APP_HEARTBEAT_TIMEOUT_MS) {
+  //   APP_LOG_ERROR("Link heartbeat timeout");
+  //   s_last_cmd_ms = now; // rate-limit log spam
+  // }
+
+  imu_bmi270_poll();
+  imu_bmi270_sample_t bmi_sample;
+  if (imu_bmi270_try_get_latest(&bmi_sample, &s_bmi_seq)) {
+    APP_LOG_INFO("BMI270 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
+                 "%ld temp=%ld",
+                 (long)bmi_sample.accel[0], (long)bmi_sample.accel[1],
+                 (long)bmi_sample.accel[2], (long)bmi_sample.gyro[0],
+                 (long)bmi_sample.gyro[1], (long)bmi_sample.gyro[2],
+                 (long)bmi_sample.temperature);
   }
 
   imu_icm42688_poll();
   imu_icm42688_sample_t imu_sample;
   if (imu_icm42688_try_get_latest(&imu_sample, &s_imu_seq)) {
-    APP_LOG_INFO("ICM45686 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
+    APP_LOG_INFO("ICM42688 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
                  "%ld temp=%ld",
                  (long)imu_sample.accel[0], (long)imu_sample.accel[1],
                  (long)imu_sample.accel[2], (long)imu_sample.gyro[0],

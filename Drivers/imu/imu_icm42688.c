@@ -3,6 +3,9 @@
 #include <string.h>
 
 #include "app_config.h"
+#include "imu_bmi270.h"
+#include "imu_icm42688_config.h"
+#include "imu_bus.h"
 #include "main.h"
 #include "spi_bus.h"
 
@@ -23,10 +26,6 @@
 
 #define ICM42688_WHO_AM_I_VALUE     0x47U
 
-#define ICM42688_ODR_200HZ          0x07U
-#define ICM42688_GYRO_FS_2000DPS    0x00U
-#define ICM42688_ACCEL_FS_16G       0x00U
-
 #define ICM42688_DATA_LEN           14U
 #define ICM42688_DATA_FRAME_LEN     (ICM42688_DATA_LEN + 1U)
 
@@ -39,9 +38,19 @@ static volatile uint8_t s_irq_pending = 0U;
 static volatile uint32_t s_sample_seq = 0U;
 static imu_icm42688_sample_t s_latest_sample;
 static uint8_t s_bank = 0U;
+static uint32_t s_last_poll_ms = 0U;
+static uint32_t s_last_sample_ms = 0U;
+static uint32_t s_blocking_fail = 0U;
+static uint32_t s_blocking_ok = 0U;
+static uint32_t s_dma_start_ms = 0U;
+static uint32_t s_dma_fail = 0U;
+static volatile uint32_t s_irq_seen = 0U;
+static uint8_t s_irq_logged = 0U;
+static uint8_t s_irq_missing_logged = 0U;
+static uint32_t s_init_ms = 0U;
 
-static uint8_t s_data_tx[ICM42688_DATA_FRAME_LEN] __attribute__((section(".dma_buffer"), aligned(32)));
-static uint8_t s_data_rx[ICM42688_DATA_FRAME_LEN] __attribute__((section(".dma_buffer"), aligned(32)));
+static uint8_t s_data_tx[ICM42688_DATA_FRAME_LEN] __attribute__((section(".bdma_buffer"), aligned(32)));
+static uint8_t s_data_rx[ICM42688_DATA_FRAME_LEN] __attribute__((section(".bdma_buffer"), aligned(32)));
 
 static int icm_spi_read(uint8_t reg, uint8_t *buf, uint32_t len);
 static int icm_spi_write(uint8_t reg, const uint8_t *buf, uint32_t len);
@@ -51,6 +60,7 @@ static void icm_parse_sample(const uint8_t *data, imu_icm42688_sample_t *sample)
 static void icm_dma_done(void *ctx, int status);
 static void icm_start_dma_read(void);
 static int icm_soft_reset(void);
+static int icm_read_blocking(imu_icm42688_sample_t *sample);
 
 static int icm_spi_read(uint8_t reg, uint8_t *buf, uint32_t len)
 {
@@ -154,25 +164,27 @@ static void icm_parse_sample(const uint8_t *data, imu_icm42688_sample_t *sample)
     sample->gyro[2] = (int16_t)((data[12] << 8) | data[13]);
 }
 
+static volatile uint32_t s_dma_done_cnt = 0U;
+static volatile uint32_t s_dma_done_err_cnt = 0U;
+static volatile uint32_t s_kick_cnt = 0U;
+static volatile uint32_t s_kick_blocked_cnt = 0U;
+
 static void icm_dma_done(void *ctx, int status)
 {
     (void)ctx;
     s_dma_inflight = 0U;
     if (status == 0)
     {
+        s_dma_done_cnt++;
         imu_icm42688_sample_t sample;
         icm_parse_sample(&s_data_rx[1], &sample);
         icm_store_sample(&sample);
+        s_last_sample_ms = HAL_GetTick();
     }
     else
     {
+        s_dma_done_err_cnt++;
         s_irq_pending = 1U;
-    }
-
-    if (s_irq_pending && !s_dma_inflight)
-    {
-        s_irq_pending = 0U;
-        icm_start_dma_read();
     }
 }
 
@@ -183,14 +195,49 @@ static void icm_start_dma_read(void)
         return;
     }
 
-    if (spi_bus_transfer_dma(&s_icm_spi, s_data_tx, s_data_rx, sizeof(s_data_tx), icm_dma_done, NULL) == 0)
+    int rc = spi_bus_transfer_dma(&s_icm_spi, s_data_tx, s_data_rx, sizeof(s_data_tx), icm_dma_done, NULL);
+    if (rc == SPI_BUS_OK)
     {
         s_dma_inflight = 1U;
+        s_dma_start_ms = HAL_GetTick();
+    }
+    else if (rc == SPI_BUS_BUSY)
+    {
+        s_irq_pending = 1U;
     }
     else
     {
         s_irq_pending = 1U;
+        if (s_dma_fail < 5U)
+        {
+            s_dma_fail++;
+            APP_LOG_ERROR("ICM42688 DMA start failed rc=%d busy=%d state=0x%lx err=0x%lx", rc,
+                          spi_bus_is_busy(), (unsigned long)hspi6.State,
+                          (unsigned long)HAL_SPI_GetError(&hspi6));
+        }
     }
+}
+
+static int icm_read_blocking(imu_icm42688_sample_t *sample)
+{
+    if (sample == NULL)
+    {
+        return -1;
+    }
+
+    uint8_t tx[ICM42688_DATA_FRAME_LEN];
+    uint8_t rx[ICM42688_DATA_FRAME_LEN];
+    memset(tx, 0, sizeof(tx));
+    tx[0] = (uint8_t)(ICM42688_REG_TEMP_DATA1 | ICM42688_SPI_READ_MASK);
+
+    int rc = spi_bus_transfer_blocking(&s_icm_spi, tx, rx, sizeof(tx), ICM42688_REG_TIMEOUT_MS);
+    if (rc != 0)
+    {
+        return rc;
+    }
+
+    icm_parse_sample(&rx[1], sample);
+    return 0;
 }
 
 bool imu_icm42688_init(void)
@@ -231,28 +278,28 @@ bool imu_icm42688_init(void)
         return false;
     }
 
-    uint8_t pwr = 0x0FU;
+    uint8_t pwr = ICM42688_CFG_PWR_MGMT0;
     if (icm_spi_write(ICM42688_REG_PWR_MGMT0, &pwr, 1U) != 0)
     {
         APP_LOG_ERROR("ICM42688 PWR_MGMT0 failed");
         return false;
     }
 
-    uint8_t accel_cfg = (uint8_t)((ICM42688_ACCEL_FS_16G << 5) | ICM42688_ODR_200HZ);
+    uint8_t accel_cfg = (uint8_t)((ICM42688_CFG_ACC_FS << 5) | ICM42688_CFG_ACC_ODR);
     if (icm_spi_write(ICM42688_REG_ACCEL_CONFIG0, &accel_cfg, 1U) != 0)
     {
         APP_LOG_ERROR("ICM42688 accel config failed");
         return false;
     }
 
-    uint8_t gyro_cfg = (uint8_t)((ICM42688_GYRO_FS_2000DPS << 5) | ICM42688_ODR_200HZ);
+    uint8_t gyro_cfg = (uint8_t)((ICM42688_CFG_GYR_FS << 5) | ICM42688_CFG_GYR_ODR);
     if (icm_spi_write(ICM42688_REG_GYRO_CONFIG0, &gyro_cfg, 1U) != 0)
     {
         APP_LOG_ERROR("ICM42688 gyro config failed");
         return false;
     }
 
-    uint8_t int_cfg = 0x1BU;
+    uint8_t int_cfg = ICM42688_CFG_INT_CONFIG;
     if (icm_spi_write(ICM42688_REG_INT_CONFIG, &int_cfg, 1U) != 0)
     {
         APP_LOG_ERROR("ICM42688 INT_CONFIG failed");
@@ -265,14 +312,14 @@ bool imu_icm42688_init(void)
         APP_LOG_ERROR("ICM42688 INT_CONFIG1 read failed");
         return false;
     }
-    int_cfg1 &= (uint8_t)~0x10U;
+    int_cfg1 &= (uint8_t)~ICM42688_CFG_INT_CONFIG1_CLR_MASK;
     if (icm_spi_write(ICM42688_REG_INT_CONFIG1, &int_cfg1, 1U) != 0)
     {
         APP_LOG_ERROR("ICM42688 INT_CONFIG1 write failed");
         return false;
     }
 
-    uint8_t int_src0 = 0x18U;
+    uint8_t int_src0 = ICM42688_CFG_INT_SOURCE0;
     if (icm_spi_write(ICM42688_REG_INT_SOURCE0, &int_src0, 1U) != 0)
     {
         APP_LOG_ERROR("ICM42688 INT_SOURCE0 failed");
@@ -284,9 +331,13 @@ bool imu_icm42688_init(void)
 
     s_init_ok = 1U;
     s_dma_inflight = 0U;
-    s_irq_pending = 0U;
+    s_irq_pending = 1U;
     s_sample_seq = 0U;
     memset(&s_latest_sample, 0, sizeof(s_latest_sample));
+    s_irq_seen = 0U;
+    s_irq_logged = 0U;
+    s_irq_missing_logged = 0U;
+    s_init_ms = HAL_GetTick();
 
     APP_LOG_INFO("ICM42688 initialized (SPI6 + DMA)");
     return true;
@@ -298,26 +349,115 @@ void imu_icm42688_handle_int1(void)
     {
         return;
     }
-    if (s_dma_inflight)
+    s_irq_seen++;
+    s_irq_pending = 1U;
+    if (imu_bus_is_ready())
     {
-        s_irq_pending = 1U;
+        imu_icm42688_kick();
+    }
+}
+
+void imu_icm42688_kick(void)
+{
+    if (!s_init_ok || s_dma_inflight || !s_irq_pending || !imu_bus_is_ready())
+    {
+        s_kick_blocked_cnt++;
         return;
     }
+    s_kick_cnt++;
+    s_irq_pending = 0U;
     icm_start_dma_read();
 }
 
+static uint32_t s_diag_last_ms = 0U;
+static uint32_t s_poll_cnt = 0U;
+
 void imu_icm42688_poll(void)
 {
+    s_poll_cnt++;
+
     if (!s_init_ok)
     {
+        APP_LOG_ERROR("ICM42688 no initialized");
         return;
     }
 
-    if (s_irq_pending && !s_dma_inflight)
+    if (imu_bus_is_ready() && s_irq_seen != 0U && s_irq_logged == 0U)
     {
-        s_irq_pending = 0U;
+        s_irq_logged = 1U;
+        APP_LOG_INFO("ICM42688 INT1 seen");
+    }
+    else if (imu_bus_is_ready() && s_irq_seen == 0U && s_irq_missing_logged == 0U &&
+             (HAL_GetTick() - s_init_ms) > 1000U)
+    {
+        s_irq_missing_logged = 1U;
+        APP_LOG_ERROR("ICM42688 INT1 not seen");
+    }
+
+    /* Diagnostic: log state every 500ms */
+    uint32_t now_diag = HAL_GetTick();
+    if ((now_diag - s_diag_last_ms) >= 500U)
+    {
+        s_diag_last_ms = now_diag;
+        APP_LOG_INFO("ICM diag: poll=%lu irq=%lu pend=%u infl=%u kick=%lu blk=%lu done=%lu err=%lu",
+                     (unsigned long)s_poll_cnt,
+                     (unsigned long)s_irq_seen, s_irq_pending, s_dma_inflight,
+                     (unsigned long)s_kick_cnt, (unsigned long)s_kick_blocked_cnt,
+                     (unsigned long)s_dma_done_cnt, (unsigned long)s_dma_done_err_cnt);
+    }
+
+    imu_icm42688_kick();
+
+#if (ICM42688_CFG_FALLBACK_POLL_MS > 0U) || (ICM42688_CFG_DMA_TIMEOUT_MS > 0U) || \
+    (ICM42688_CFG_FALLBACK_BLOCKING_MS > 0U)
+    uint32_t now = HAL_GetTick();
+#endif
+
+#if ICM42688_CFG_FALLBACK_POLL_MS > 0U
+    if ((now - s_last_poll_ms) >= ICM42688_CFG_FALLBACK_POLL_MS)
+    {
+        s_last_poll_ms = now;
         icm_start_dma_read();
     }
+#endif
+
+#if ICM42688_CFG_DMA_TIMEOUT_MS > 0U
+    if (s_dma_inflight && ((now - s_dma_start_ms) >= ICM42688_CFG_DMA_TIMEOUT_MS))
+    {
+        s_dma_inflight = 0U;
+        spi_bus_abort();
+        s_irq_pending = 1U;
+        APP_LOG_ERROR("ICM42688 DMA timeout, aborting");
+    }
+#endif
+
+#if ICM42688_CFG_FALLBACK_BLOCKING_MS > 0U
+    if (!s_dma_inflight && ((now - s_last_sample_ms) >= ICM42688_CFG_FALLBACK_BLOCKING_MS))
+    {
+        imu_icm42688_sample_t sample;
+        int rc = icm_read_blocking(&sample);
+        if (rc == 0)
+        {
+            icm_store_sample(&sample);
+            s_last_sample_ms = now;
+            if (s_blocking_ok < 3U)
+            {
+                s_blocking_ok++;
+                APP_LOG_INFO("ICM42688 blocking read ok");
+            }
+            s_blocking_fail = 0U;
+        }
+        else
+        {
+            if (s_blocking_fail < 5U)
+            {
+                s_blocking_fail++;
+                APP_LOG_ERROR("ICM42688 blocking read failed rc=%d busy=%d", rc,
+                              spi_bus_is_busy());
+            }
+        }
+    }
+#endif
 }
 
 bool imu_icm42688_try_get_latest(imu_icm42688_sample_t *out, uint32_t *seq)
@@ -358,5 +498,9 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     if (GPIO_Pin == ICM42688_INT1_Pin)
     {
         imu_icm42688_handle_int1();
+    }
+    else if (GPIO_Pin == BMI270_INT1_Pin)
+    {
+        imu_bmi270_handle_int1();
     }
 }

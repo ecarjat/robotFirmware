@@ -4,11 +4,6 @@
 #include <string.h>
 
 #define SPI_BUS_CACHE_LINE_BYTES 32U
-#define SPI_BUS_OK               0
-#define SPI_BUS_ERR              -1
-#define SPI_BUS_BUSY             -2
-#define SPI_BUS_ARG              -3
-#define SPI_BUS_TIMEOUT          -4
 #define SPI_BUS_HAL_TIMEOUT_MS   50U
 
 typedef struct {
@@ -32,6 +27,10 @@ typedef struct {
     volatile uint8_t done;
     int status;
 } spi_bus_wait_t;
+
+__attribute__((weak)) void spi_bus_idle_hook(void)
+{
+}
 
 static void spi_bus_wait_cb(void *ctx, int status)
 {
@@ -175,6 +174,8 @@ static void spi_bus_finish(int status)
     {
         cb(cb_ctx, status);
     }
+
+    spi_bus_idle_hook();
 }
 
 int spi_bus_init(SPI_HandleTypeDef *hspi)
@@ -182,6 +183,10 @@ int spi_bus_init(SPI_HandleTypeDef *hspi)
     if (hspi == NULL)
     {
         return SPI_BUS_ARG;
+    }
+    if (s_bus.hspi == hspi)
+    {
+        return SPI_BUS_OK;
     }
     memset(&s_bus, 0, sizeof(s_bus));
     s_bus.hspi = hspi;
@@ -254,7 +259,11 @@ int spi_bus_transfer_dma(spi_bus_device_t *dev,
     spi_bus_cache_clean_invalidate(rx, len);
 
     spi_bus_assert_cs(dev);
-    if (HAL_SPI_TransmitReceive_DMA(s_bus.hspi, (uint8_t *)tx, rx, (uint16_t)len) != HAL_OK)
+    HAL_StatusTypeDef st = HAL_SPI_TransmitReceive_DMA(s_bus.hspi,
+                                                       (uint8_t *)tx,
+                                                       rx,
+                                                       (uint16_t)len);
+    if (st != HAL_OK)
     {
         spi_bus_deassert_cs(dev);
         s_bus.busy = 0U;
@@ -264,7 +273,7 @@ int spi_bus_transfer_dma(spi_bus_device_t *dev,
         s_bus.len = 0U;
         s_bus.cb = NULL;
         s_bus.cb_ctx = NULL;
-        return SPI_BUS_ERR;
+        return (st == HAL_BUSY) ? SPI_BUS_BUSY : SPI_BUS_ERR;
     }
 
     return SPI_BUS_OK;
@@ -339,12 +348,48 @@ int spi_bus_transfer_blocking(spi_bus_device_t *dev,
     s_bus.busy = 0U;
     s_bus.active_dev = NULL;
 
-    return (st == HAL_OK) ? SPI_BUS_OK : SPI_BUS_ERR;
+    if (st == HAL_OK)
+    {
+        return SPI_BUS_OK;
+    }
+    return (st == HAL_BUSY) ? SPI_BUS_BUSY : SPI_BUS_ERR;
 }
 
 int spi_bus_is_busy(void)
 {
     return s_bus.busy ? 1 : 0;
+}
+
+void spi_bus_abort(void)
+{
+    if (!s_bus.busy || s_bus.hspi == NULL)
+    {
+        return;
+    }
+
+    spi_bus_done_cb_t cb = s_bus.cb;
+    void *cb_ctx = s_bus.cb_ctx;
+    spi_bus_device_t *dev = s_bus.active_dev;
+    uint8_t *rx = s_bus.rx;
+    size_t len = s_bus.len;
+
+    s_bus.cb = NULL;
+    s_bus.cb_ctx = NULL;
+    s_bus.active_dev = NULL;
+    s_bus.tx = NULL;
+    s_bus.rx = NULL;
+    s_bus.len = 0U;
+    s_bus.busy = 0U;
+
+    spi_bus_deassert_cs(dev);
+    spi_bus_cache_invalidate(rx, len);
+
+    (void)HAL_SPI_Abort(s_bus.hspi);
+
+    if (cb != NULL)
+    {
+        cb(cb_ctx, SPI_BUS_ERR);
+    }
 }
 
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)

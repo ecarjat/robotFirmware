@@ -1,0 +1,21 @@
+#ifndef IMU_ICM42688_CONFIG_H
+#define IMU_ICM42688_CONFIG_H
+
+/* ICM42688 bring-up configuration */
+#define ICM42688_CFG_PWR_MGMT0      0x0FU
+
+#define ICM42688_CFG_ACC_ODR        0x07U  /* 200 Hz */
+#define ICM42688_CFG_ACC_FS         0x00U  /* +/-16g */
+
+#define ICM42688_CFG_GYR_ODR        0x07U  /* 200 Hz */
+#define ICM42688_CFG_GYR_FS         0x00U  /* +/-2000 dps */
+
+#define ICM42688_CFG_INT_CONFIG     0x1BU
+#define ICM42688_CFG_INT_SOURCE0    0x18U  /* UI DRDY on INT1 */
+#define ICM42688_CFG_INT_CONFIG1_CLR_MASK 0x10U
+
+#define ICM42688_CFG_FALLBACK_POLL_MS 0U
+#define ICM42688_CFG_FALLBACK_BLOCKING_MS 0U
+#define ICM42688_CFG_DMA_TIMEOUT_MS 20U
+
+#endif /* IMU_ICM42688_CONFIG_H */

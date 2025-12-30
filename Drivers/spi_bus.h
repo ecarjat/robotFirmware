@@ -6,6 +6,12 @@
 
 #include "stm32h7xx_hal.h"
 
+#define SPI_BUS_OK      0
+#define SPI_BUS_ERR     -1
+#define SPI_BUS_BUSY    -2
+#define SPI_BUS_ARG     -3
+#define SPI_BUS_TIMEOUT -4
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -45,6 +51,7 @@ int spi_bus_transfer_blocking(spi_bus_device_t *dev,
                               uint8_t *rx,
                               size_t len,
                               uint32_t timeout_ms);
+void spi_bus_abort(void);
 int spi_bus_is_busy(void);
 
 #ifdef __cplusplus
