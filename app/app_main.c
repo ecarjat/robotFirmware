@@ -13,6 +13,7 @@
 #include "imu_icm42688.h"
 #include "imu_sched.h"
 #include "mux_channels.h"
+#include "param_storage.h"
 #include "shared_protocol/robot_protocol.h"
 #include "stm32h7xx_hal.h"
 #include "usbd_cdc_if.h"
@@ -76,8 +77,23 @@ static uint32_t s_imu_seq = 0U;
 static uint32_t s_bmi_seq = 0U;
 static uint32_t s_bmm_seq = 0U;
 
+/* Global robot parameters (loaded from flash at startup) */
+robot_params_t g_robot_params;
+
 static void app_init(void) {
   HAL_Delay(2000);
+
+  /* Load robot parameters from flash (or use defaults) */
+  param_storage_init();
+  int param_rc = param_storage_load(&g_robot_params);
+  if (param_rc == PARAM_ERR_NOT_FOUND) {
+    APP_LOG_INFO("No saved params, using defaults");
+  } else if (param_rc == PARAM_OK) {
+    APP_LOG_INFO("Loaded params from flash");
+  } else {
+    APP_LOG_ERROR("Param load error: %d", param_rc);
+  }
+
   robot_mux_init(&s_mux);
   robot_mux_register(&s_mux, ROBOT_CHANNEL_CMD, app_cmd_handler, NULL);
 
@@ -130,25 +146,25 @@ static void app_idle_tick(void) {
   // }
   if ((now - s_last_log_ms) >= APP_LOG_PERIOD_MS) {
     s_last_log_ms = now;
-    // imu_bmi270_sample_t bmi_sample;
-    // if (imu_bmi270_try_get_latest(&bmi_sample, &s_bmi_seq)) {
-    //   APP_LOG_INFO("BMI270 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
-    //                "%ld temp=%ld",
-    //                (long)bmi_sample.accel[0], (long)bmi_sample.accel[1],
-    //                (long)bmi_sample.accel[2], (long)bmi_sample.gyro[0],
-    //                (long)bmi_sample.gyro[1], (long)bmi_sample.gyro[2],
-    //                (long)bmi_sample.temperature);
-    // }
+    imu_bmi270_sample_t bmi_sample;
+    if (imu_bmi270_try_get_latest(&bmi_sample, &s_bmi_seq)) {
+      APP_LOG_INFO("BMI270 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
+                   "%ld temp=%ld",
+                   (long)bmi_sample.accel[0], (long)bmi_sample.accel[1],
+                   (long)bmi_sample.accel[2], (long)bmi_sample.gyro[0],
+                   (long)bmi_sample.gyro[1], (long)bmi_sample.gyro[2],
+                   (long)bmi_sample.temperature);
+    }
 
-    // imu_icm42688_sample_t imu_sample;
-    // if (imu_icm42688_try_get_latest(&imu_sample, &s_imu_seq)) {
-    //   APP_LOG_INFO("ICM42688 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
-    //                "%ld temp=%ld",
-    //                (long)imu_sample.accel[0], (long)imu_sample.accel[1],
-    //                (long)imu_sample.accel[2], (long)imu_sample.gyro[0],
-    //                (long)imu_sample.gyro[1], (long)imu_sample.gyro[2],
-    //                (long)imu_sample.temperature);
-    // }
+    imu_icm42688_sample_t imu_sample;
+    if (imu_icm42688_try_get_latest(&imu_sample, &s_imu_seq)) {
+      APP_LOG_INFO("ICM42688 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
+                   "%ld temp=%ld",
+                   (long)imu_sample.accel[0], (long)imu_sample.accel[1],
+                   (long)imu_sample.accel[2], (long)imu_sample.gyro[0],
+                   (long)imu_sample.gyro[1], (long)imu_sample.gyro[2],
+                   (long)imu_sample.temperature);
+    }
 
     imu_bmm150_sample_t bmm_sample;
     if (imu_bmm150_try_get_latest(&bmm_sample, &s_bmm_seq)) {

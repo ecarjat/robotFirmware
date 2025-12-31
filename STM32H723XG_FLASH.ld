@@ -53,6 +53,12 @@
 ENTRY(Reset_Handler)
 
 /* Specify the memory areas */
+/* Flash layout:
+ *   Bootloader:  0x08000000 - 0x0801FFFF (128K) - not mapped here
+ *   Application: 0x08020000 - 0x080BFFFF (640K) - FLASH region
+ *   Parameters:  0x080C0000 - 0x080DFFFF (128K) - PARAM_FLASH region
+ *   BL Metadata: 0x080E0000 - 0x080FFFFF (128K) - reserved for bootloader
+ */
 MEMORY
 {
 DTCMRAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 128K
@@ -60,7 +66,8 @@ RAM_D1 (xrw)      : ORIGIN = 0x24000000, LENGTH = 320K
 RAM_D2 (xrw)      : ORIGIN = 0x30000000, LENGTH = 32K
 RAM_D3 (xrw)      : ORIGIN = 0x38000000, LENGTH = 16K
 ITCMRAM (xrw)      : ORIGIN = 0x00000000, LENGTH = 64K
-FLASH (rx)      : ORIGIN = 0x8020000, LENGTH = 0xC0000
+FLASH (rx)      : ORIGIN = 0x08020000, LENGTH = 0xA0000   /* 640K application */
+PARAM_FLASH (r)   : ORIGIN = 0x080C0000, LENGTH = 0x20000   /* 128K parameters */
 }
 
 /* Highest address of the user mode stack */
@@ -68,6 +75,11 @@ _estack = ORIGIN(DTCMRAM) + LENGTH(DTCMRAM);    /* end of RAM */
 /* Generate a link error if heap and stack don't fit into RAM */
 _Min_Heap_Size = 0x200;      /* required amount of heap  */
 _Min_Stack_Size = 0x400; /* required amount of stack */
+
+/* Parameter storage flash region symbols */
+_param_flash_start = ORIGIN(PARAM_FLASH);
+_param_flash_end   = ORIGIN(PARAM_FLASH) + LENGTH(PARAM_FLASH);
+_param_flash_size  = LENGTH(PARAM_FLASH);
 
 /* Define output sections */
 SECTIONS
