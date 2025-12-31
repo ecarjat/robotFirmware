@@ -8,6 +8,7 @@ typedef enum
 {
     IMU_SCHED_SENSOR_BMI270 = 0,
     IMU_SCHED_SENSOR_ICM42688 = 1,
+    IMU_SCHED_SENSOR_BMM150 = 2,
     IMU_SCHED_SENSOR_COUNT
 } imu_sched_sensor_t;
 

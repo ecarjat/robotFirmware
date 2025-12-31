@@ -8,6 +8,7 @@
 #include "crc32.h"
 #include "framing_cobs.h"
 #include "imu_bmi270.h"
+#include "imu_bmm150.h"
 #include "imu_bus.h"
 #include "imu_icm42688.h"
 #include "imu_sched.h"
@@ -73,6 +74,7 @@ static uint32_t s_last_cmd_ms = 0U;
 static uint32_t s_last_log_ms = 0U;
 static uint32_t s_imu_seq = 0U;
 static uint32_t s_bmi_seq = 0U;
+static uint32_t s_bmm_seq = 0U;
 
 static void app_init(void) {
   HAL_Delay(2000);
@@ -97,10 +99,16 @@ static void app_init(void) {
     APP_LOG_ERROR("ICM42688 init failed");
   }
 
-  if (bmi_ok && icm_ok) {
+  bool bmm_ok = imu_bmm150_init();
+  if (!bmm_ok) {
+    APP_LOG_ERROR("BMM150 init failed");
+  }
+
+  if (bmi_ok && icm_ok && bmm_ok) {
     imu_bus_set_ready(1U);
     imu_sched_request(IMU_SCHED_SENSOR_BMI270);
     imu_sched_request(IMU_SCHED_SENSOR_ICM42688);
+    imu_sched_request(IMU_SCHED_SENSOR_BMM150);
     imu_sched_run();
   } else {
     APP_LOG_ERROR("IMU bus not ready; one or more inits failed");
@@ -122,24 +130,30 @@ static void app_idle_tick(void) {
   // }
   if ((now - s_last_log_ms) >= APP_LOG_PERIOD_MS) {
     s_last_log_ms = now;
-    imu_bmi270_sample_t bmi_sample;
-    if (imu_bmi270_try_get_latest(&bmi_sample, &s_bmi_seq)) {
-      APP_LOG_INFO("BMI270 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
-                   "%ld temp=%ld",
-                   (long)bmi_sample.accel[0], (long)bmi_sample.accel[1],
-                   (long)bmi_sample.accel[2], (long)bmi_sample.gyro[0],
-                   (long)bmi_sample.gyro[1], (long)bmi_sample.gyro[2],
-                   (long)bmi_sample.temperature);
-    }
+    // imu_bmi270_sample_t bmi_sample;
+    // if (imu_bmi270_try_get_latest(&bmi_sample, &s_bmi_seq)) {
+    //   APP_LOG_INFO("BMI270 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
+    //                "%ld temp=%ld",
+    //                (long)bmi_sample.accel[0], (long)bmi_sample.accel[1],
+    //                (long)bmi_sample.accel[2], (long)bmi_sample.gyro[0],
+    //                (long)bmi_sample.gyro[1], (long)bmi_sample.gyro[2],
+    //                (long)bmi_sample.temperature);
+    // }
 
-    imu_icm42688_sample_t imu_sample;
-    if (imu_icm42688_try_get_latest(&imu_sample, &s_imu_seq)) {
-      APP_LOG_INFO("ICM42688 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
-                   "%ld temp=%ld",
-                   (long)imu_sample.accel[0], (long)imu_sample.accel[1],
-                   (long)imu_sample.accel[2], (long)imu_sample.gyro[0],
-                   (long)imu_sample.gyro[1], (long)imu_sample.gyro[2],
-                   (long)imu_sample.temperature);
+    // imu_icm42688_sample_t imu_sample;
+    // if (imu_icm42688_try_get_latest(&imu_sample, &s_imu_seq)) {
+    //   APP_LOG_INFO("ICM42688 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
+    //                "%ld temp=%ld",
+    //                (long)imu_sample.accel[0], (long)imu_sample.accel[1],
+    //                (long)imu_sample.accel[2], (long)imu_sample.gyro[0],
+    //                (long)imu_sample.gyro[1], (long)imu_sample.gyro[2],
+    //                (long)imu_sample.temperature);
+    // }
+
+    imu_bmm150_sample_t bmm_sample;
+    if (imu_bmm150_try_get_latest(&bmm_sample, &s_bmm_seq)) {
+      APP_LOG_INFO("BMM150 mag [uT] = %ld, %ld, %ld", (long)bmm_sample.mag[0],
+                   (long)bmm_sample.mag[1], (long)bmm_sample.mag[2]);
     }
   }
 

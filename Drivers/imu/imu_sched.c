@@ -4,6 +4,8 @@
 
 #include "imu_bmi270.h"
 #include "imu_bmi270_config.h"
+#include "imu_bmm150.h"
+#include "imu_bmm150_config.h"
 #include "imu_bus.h"
 #include "imu_icm42688.h"
 #include "imu_icm42688_config.h"
@@ -15,7 +17,8 @@ typedef bool (*imu_sched_kick_fn_t)(void);
 
 static const imu_sched_kick_fn_t s_kick_fns[IMU_SCHED_SENSOR_COUNT] = {
     imu_bmi270_kick,
-    imu_icm42688_kick
+    imu_icm42688_kick,
+    imu_bmm150_kick
 };
 
 static volatile uint32_t s_pending_mask = 0U;
@@ -116,8 +119,10 @@ void imu_sched_init(void)
     s_active_start_ms = 0U;
     s_min_interval_ms[IMU_SCHED_SENSOR_BMI270] = IMU_SCHED_BMI270_MIN_INTERVAL_MS;
     s_min_interval_ms[IMU_SCHED_SENSOR_ICM42688] = IMU_SCHED_ICM42688_MIN_INTERVAL_MS;
+    s_min_interval_ms[IMU_SCHED_SENSOR_BMM150] = IMU_SCHED_BMM150_MIN_INTERVAL_MS;
     s_timeout_ms[IMU_SCHED_SENSOR_BMI270] = BMI270_CFG_DMA_TIMEOUT_MS;
     s_timeout_ms[IMU_SCHED_SENSOR_ICM42688] = ICM42688_CFG_DMA_TIMEOUT_MS;
+    s_timeout_ms[IMU_SCHED_SENSOR_BMM150] = BMM150_CFG_DMA_TIMEOUT_MS;
 }
 
 void imu_sched_set_min_interval(imu_sched_sensor_t sensor, uint32_t min_interval_ms)
@@ -230,6 +235,21 @@ void imu_sched_tick(void)
     if (!imu_bus_is_ready())
     {
         return;
+    }
+
+    if (BMM150_CFG_FALLBACK_POLL_MS > 0U)
+    {
+        uint32_t now_ms = HAL_GetTick();
+        uint32_t mask = imu_sched_mask(IMU_SCHED_SENSOR_BMM150);
+        __disable_irq();
+        uint32_t pending = s_pending_mask;
+        uint32_t last_served = s_last_served_ms[IMU_SCHED_SENSOR_BMM150];
+        __enable_irq();
+        if ((pending & mask) == 0U &&
+            (now_ms - last_served) >= BMM150_CFG_FALLBACK_POLL_MS)
+        {
+            imu_sched_set_pending(IMU_SCHED_SENSOR_BMM150, now_ms);
+        }
     }
 
     if (!spi_bus_is_busy())

@@ -1,5 +1,5 @@
 # PIN_MAPPING.md — WeAct STM32H723VGT6 (WeAct STM32H7xx Board V1.2) Robot Wiring
-Version: 1.1 (Primary IMU = BMI270)  
+Version: 1.2 (Primary IMU = BMI270)  
 Audience: Codex + embedded firmware implementation (STM32CubeIDE/HAL or LL)
 
 ## 0) Goal
@@ -11,7 +11,7 @@ Concrete, conflict-free pin/port mapping for the robot architecture:
 
 Constraints:
 - Do not reuse pins consumed by **on-board TFT**, **microSD**, **USB FS**, **QSPI flash**, **SWD**.
-- Use I2C for BMI270 + BMM150; ICM42688 is on SPI6.
+- Use **SPI6** for BMI270 + ICM42688 + BMM150 (CS on PD14/PD15/PD10).
 - Use **UART for all 3 TFmini Plus**.
 - Use **4 dedicated UART links** for 4 motor driver nodes.
 - Use **1 UART spine** between STM32 and ESP32 @ 921600 + optional RTS/CTS.
@@ -49,11 +49,11 @@ Source: Board schematic (WeAct STM32H7xx V1.2).  [oai_citation:0‡STM32H7xx Sch
 - PE2 = QSPI_BK1_IO2
 - PD13 = QSPI_BK1_IO3
 
-### 1.5 SPI Flash (on-board)
+### 1.5 SPI Flash (on-board, SPI1)
 - PB4  = SPIx_MISO
 - PD7  = SPIx_MOSI
 - PB3  = SPIx_CLK
-- PD11 = SPIx_CS
+- PD6  = SPI_FLASH_CS
 
 ### 1.6 SWD (debug)
 - PA13 = SWDIO
@@ -61,41 +61,33 @@ Source: Board schematic (WeAct STM32H7xx V1.2).  [oai_citation:0‡STM32H7xx Sch
 
 ---
 
-## 2) I2C Buses (BMI270 + BMM150)
-### 2.1 I2C1 — Primary IMU bus (cleanest, highest priority)
-- PB8 = I2C1_SCL
-- PB7 = I2C1_SDA  
-
-Devices on I2C1:
-- **BMI270 (IMU #1, PRIMARY)**
-
-Suggested interrupts (EXTI-capable GPIOs; can be changed):
-- PC3 = BMI270_INT1
-
-### 2.2 I2C2 — Magnetometer bus
-- PB10 = I2C2_SCL (set AF in CubeMX)
-- PB11 = I2C2_SDA (set AF in CubeMX)
-
-Devices on I2C2:
-- **BMM150  (Magnetometer)**
-
-Electrical:
-- Each I2C bus has its own pull-ups to 3.3V (start 2.2k–4.7k).
-- Start at 400 kHz; drop to 100 kHz if errors.
-
-### 2.3 SPI6 — ICM42688 IMU (SPI)
+## 2) Sensor Buses
+### 2.1 SPI6 — IMU/Mag bus (CubeMX source of truth)
 - PA5 = SPI6_SCK
 - PA6 = SPI6_MISO
 - PA7 = SPI6_MOSI
+
+Chip selects:
+- PD10 = BMM150_CS
+- PD14 = BMI270_CS
 - PD15 = ICM42688_CS
 
 Interrupts:
 - PC0 = ICM42688_INT1
-- PC2 = ICM42688_INT2
+- PC1 = BMI270_INT1
+- PC2 = BMM150_INT1 (DRDY wired)
 
 Notes:
-- SPI mode 3; DMA on RX/TX.
+- SPI6 configured in CubeMX (8-bit, prescaler 4, CPOL low).
+- DMA on RX/TX via BDMA.
 - All IMUs/magnetometer on SPI must use the shared SPI bus layer for mutual exclusion + CS timing.
+
+### 2.2 I2C1 — Auxiliary bus (configured, no sensors assigned)
+- PB8 = I2C1_SCL
+- PB7 = I2C1_SDA
+
+Notes:
+- I2C2 is not configured in CubeMX (no pins assigned).
 
 ---
 
@@ -192,8 +184,8 @@ Firmware:
 ## 9) Codex instructions (must follow)
 1) Use this mapping as source-of-truth.
 2) Generate CubeMX/HAL init for:
-   - I2C1 
-   - I2C2 
+   - I2C1
+   - SPI6
    - USART2 (ESP32 spine)  +  RTS/CTS
    - Motor UARTs 
    - LiDAR UARTs u
