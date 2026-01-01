@@ -25,6 +25,9 @@
 /* USER CODE BEGIN Includes */
 #include "app_main.h"
 #include "bsp_driver_sd.h"
+#include "debug_wdog.h"
+#include "log.h"
+#include "app_config.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -47,6 +50,8 @@
 CRC_HandleTypeDef hcrc;
 
 I2C_HandleTypeDef hi2c1;
+
+IWDG_HandleTypeDef hiwdg1;
 
 OSPI_HandleTypeDef hospi1;
 
@@ -108,6 +113,7 @@ static void MX_USART3_UART_Init(void);
 static void MX_UART4_Init(void);
 static void MX_SPI6_Init(void);
 static void MX_CRC_Init(void);
+static void MX_IWDG1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -131,13 +137,30 @@ int main(void)
   /* MPU Configuration--------------------------------------------------------*/
   MPU_Config();
 
+  /* Enable the CPU Cache */
+
+  /* Enable I-Cache---------------------------------------------------------*/
+  SCB_EnableICache();
+
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  /*
+   * Initialize debug watchdog early to detect IWDG resets.
+   * Must be after HAL_Init() for backup SRAM access.
+   * NOTE: WDOG_CHECKPOINT() cannot be called yet - IWDG not initialized.
+   */
+  debug_wdog_init();
+#if DEBUG_FAULTS
+  /* Make bus faults precise and trap on bus errors during debug. */
+  SCB->SHCSR |= SCB_SHCSR_BUSFAULTENA_Msk;
+#if defined(SCnSCB_ACTLR_DISDEFWBUF_Msk)
+  SCnSCB->ACTLR |= SCnSCB_ACTLR_DISDEFWBUF_Msk;
+#endif
+#endif
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -147,7 +170,7 @@ int main(void)
   PeriphCommonClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  /* NOTE: WDOG_CHECKPOINT() cannot be called yet - IWDG not initialized */
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -172,8 +195,52 @@ int main(void)
   MX_UART4_Init();
   MX_SPI6_Init();
   MX_CRC_Init();
+  MX_IWDG1_Init();
   /* USER CODE BEGIN 2 */
+  WDOG_CHECKPOINT(WDOG_CP_IWDG_INIT);
+
+  /*
+   * Log watchdog reset info if this was a recovery from hang.
+   * Note: USB not yet enumerated, so this goes to the ring buffer
+   * and will be sent once USB is ready.
+   */
+  if (debug_wdog_was_reset()) {
+    app_log_printf("[WDOG] Reset detected! Last checkpoint: 0x%04X (%s)\r\n",
+                   debug_wdog_get_last_checkpoint(),
+                   debug_wdog_checkpoint_name(debug_wdog_get_last_checkpoint()));
+  }
+  debug_wdog_fault_t fault;
+  if (debug_wdog_get_fault(&fault)) {
+    app_log_printf("[FAULT] hfsr=0x%08lX cfsr=0x%08lX bfar=0x%08lX "
+                   "mmfar=0x%08lX lr=0x%08lX pc=0x%08lX psr=0x%08lX sp=0x%08lX\r\n",
+                   (unsigned long)fault.hfsr,
+                   (unsigned long)fault.cfsr,
+                   (unsigned long)fault.bfar,
+                   (unsigned long)fault.mmfar,
+                   (unsigned long)fault.lr,
+                   (unsigned long)fault.pc,
+                   (unsigned long)fault.psr,
+                   (unsigned long)fault.sp);
+  }
+
+  /*
+   * EXTI Race Condition Fix:
+   * CubeMX enables IMU EXTI interrupts in MX_GPIO_Init(), but IMU sensors
+   * are not initialized until app_init(). On cold boot, sensors may be in
+   * an undefined state and generate spurious interrupts that corrupt the
+   * scheduler state before it's ready.
+   *
+   * Solution: Disable IMU EXTI immediately after MX_GPIO_Init() completes.
+   * They will be re-enabled in app_init() after successful sensor init.
+   * See: docs/CodeReview311225.md for full analysis.
+   */
+  HAL_NVIC_DisableIRQ(ICM42688_INT1_EXTI_IRQn);
+  HAL_NVIC_DisableIRQ(BMI270_INT1_EXTI_IRQn);
+  HAL_NVIC_DisableIRQ(BMM150_INT1_EXTI_IRQn);
+  WDOG_CHECKPOINT(WDOG_CP_EXTI_DISABLE);
+
   HAL_GPIO_WritePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin, GPIO_PIN_SET);
+  WDOG_CHECKPOINT(WDOG_CP_APP_MAIN_ENTER);
   app_main();
   /* USER CODE END 2 */
 
@@ -209,8 +276,9 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 5;
@@ -359,6 +427,35 @@ static void MX_I2C1_Init(void)
   /* USER CODE BEGIN I2C1_Init 2 */
 
   /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief IWDG1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG1_Init(void)
+{
+
+  /* USER CODE BEGIN IWDG1_Init 0 */
+
+  /* USER CODE END IWDG1_Init 0 */
+
+  /* USER CODE BEGIN IWDG1_Init 1 */
+
+  /* USER CODE END IWDG1_Init 1 */
+  hiwdg1.Instance = IWDG1;
+  hiwdg1.Init.Prescaler = IWDG_PRESCALER_256;
+  hiwdg1.Init.Window = IWDG_WINDOW_DISABLE;
+  hiwdg1.Init.Reload = 500;
+  if (HAL_IWDG_Init(&hiwdg1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN IWDG1_Init 2 */
+
+  /* USER CODE END IWDG1_Init 2 */
 
 }
 
@@ -567,7 +664,7 @@ static void MX_SPI6_Init(void)
   hspi6.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi6.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi6.Init.NSS = SPI_NSS_SOFT;
-  hspi6.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
+  hspi6.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
   hspi6.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi6.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi6.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;

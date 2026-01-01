@@ -22,6 +22,7 @@
 #include "stm32h7xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "debug_wdog.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -41,6 +42,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
+static uint32_t s_wdog_tick = 0U;
 
 /* USER CODE END PV */
 
@@ -106,10 +108,20 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-  // volatile uint32_t hf_hfsr = SCB->HFSR;
-  // volatile uint32_t hf_cfsr = SCB->CFSR;
-  // volatile uint32_t hf_bfar = SCB->BFAR;
-  // volatile uint32_t hf_mmfar = SCB->MMFAR;
+  uint32_t sp = __get_MSP();
+  uint32_t *stack = (uint32_t *)sp;
+  uint32_t lr = stack[5];
+  uint32_t pc = stack[6];
+  uint32_t psr = stack[7];
+
+  debug_wdog_record_fault(SCB->HFSR,
+                          SCB->CFSR,
+                          SCB->BFAR,
+                          SCB->MMFAR,
+                          lr,
+                          pc,
+                          psr,
+                          sp);
   for (;;) {
     __NOP();
   }
@@ -216,6 +228,10 @@ void SysTick_Handler(void)
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
+  if (++s_wdog_tick >= 100U) {
+    s_wdog_tick = 0U;
+    debug_wdog_refresh();
+  }
 
   /* USER CODE END SysTick_IRQn 1 */
 }
