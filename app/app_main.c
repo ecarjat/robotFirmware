@@ -6,16 +6,26 @@
 #include "app_config.h"
 #include "app_main.h"
 #include "crc32.h"
+#include "debug_wdog.h"
 #include "framing_cobs.h"
-#include "imu_bmi270.h"
-#include "imu_bmm150.h"
 #include "imu_bus.h"
-#include "imu_icm42688.h"
 #include "imu_sched.h"
+#include "motor_link.h"
 #include "mux_channels.h"
 #include "param_storage.h"
+#include "sensors.h"
+#if SENSOR_ENABLE_BMI270
+#include "imu_bmi270.h"
+#endif
+#if SENSOR_ENABLE_ICM42688
+#include "imu_icm42688.h"
+#endif
+#if SENSOR_ENABLE_BMM150
+#include "imu_bmm150.h"
+#endif
 #include "shared_protocol/robot_protocol.h"
 #include "stm32h7xx_hal.h"
+#include "system_reboot.h"
 #include "usbd_cdc_if.h"
 
 #define APP_LINK_RX_BUFFER_BYTES 512U
@@ -33,6 +43,7 @@
 #ifndef APP_LINK_DEBUG_MAX_BYTES
 #define APP_LINK_DEBUG_MAX_BYTES 48U
 #define ROBOT_USE_HW_CRC 1
+// #define ENABLE_MOTORS
 #endif
 
 static void app_init(void);
@@ -47,6 +58,7 @@ static void app_link_log_bytes(const char *label, const uint8_t *data,
 static void app_link_dispatch(const robot_frame_t *frame);
 static void app_cmd_handler(uint8_t msg_type, const uint8_t *payload,
                             size_t len, void *ctx);
+static void app_link_poll(void);
 static void app_link_restart_rx(void);
 static bool app_link_send(uint8_t type, uint16_t flags, const uint8_t *payload,
                           uint16_t len, uint16_t seq_override);
@@ -54,6 +66,8 @@ static void app_send_telem(void);
 static void app_link_clear_uart_errors(UART_HandleTypeDef *huart);
 static void app_link_invalidate_rx_cache(size_t len);
 static bool app_link_dma_is_circular(void);
+static void app_log_sensors(void);
+static void app_log_link_errors(void);
 
 void app_main(void) {
   app_init();
@@ -73,15 +87,27 @@ static uint16_t s_seq_counters[ROBOT_CHANNEL_MAX + 1U] = {0};
 static uint32_t s_last_telem_ms = 0U;
 static uint32_t s_last_cmd_ms = 0U;
 static uint32_t s_last_log_ms = 0U;
+static uint32_t s_last_led_ms = 0U;
 static uint32_t s_imu_seq = 0U;
 static uint32_t s_bmi_seq = 0U;
 static uint32_t s_bmm_seq = 0U;
+static volatile uint32_t s_link_decode_failures = 0U;
+static volatile uint32_t s_link_decode_last_len = 0U;
+static volatile uint32_t s_link_overflows = 0U;
+static volatile uint32_t s_link_uart_errors = 0U;
+static volatile uint32_t s_link_uart_last_err = 0U;
+static volatile uint16_t s_uart_rx_pending_size = 0U;
+static volatile uint8_t s_uart_rx_event_pending = 0U;
 
 /* Global robot parameters (loaded from flash at startup) */
 robot_params_t g_robot_params;
 
 static void app_init(void) {
+  WDOG_CHECKPOINT(WDOG_CP_APP_INIT_START);
+  // for(int i=0; i <10 ; i++){
   HAL_Delay(2000);
+  // WDOG_CHECKPOINT(WDOG_CP_APP_INIT_START);
+  // }
 
   /* Load robot parameters from flash (or use defaults) */
   param_storage_init();
@@ -93,52 +119,122 @@ static void app_init(void) {
   } else {
     APP_LOG_ERROR("Param load error: %d", param_rc);
   }
-
-  robot_mux_init(&s_mux);
-  robot_mux_register(&s_mux, ROBOT_CHANNEL_CMD, app_cmd_handler, NULL);
-
   APP_LOG_INFO("Booting robot firmware (frame v%u)", ROBOT_FRAME_VERSION);
   APP_LOG_INFO("CMD channel id: %u", ROBOT_CHANNEL_CMD);
 
-  app_link_start();
   s_last_cmd_ms = HAL_GetTick();
 
   imu_sched_init();
 
+  bool sensors_ok = true;
+#if SENSOR_ENABLE_BMI270
+  WDOG_CHECKPOINT(WDOG_CP_BMI270_INIT_START);
   bool bmi_ok = imu_bmi270_init();
+  WDOG_CHECKPOINT(WDOG_CP_BMI270_INIT_DONE);
   if (!bmi_ok) {
     APP_LOG_ERROR("BMI270 init failed");
   }
+  sensors_ok &= bmi_ok;
+#endif
 
+#if SENSOR_ENABLE_ICM42688
+  WDOG_CHECKPOINT(WDOG_CP_ICM42688_INIT_START);
   bool icm_ok = imu_icm42688_init();
+  WDOG_CHECKPOINT(WDOG_CP_ICM42688_INIT_DONE);
   if (!icm_ok) {
     APP_LOG_ERROR("ICM42688 init failed");
   }
+  sensors_ok &= icm_ok;
+#endif
 
+#if SENSOR_ENABLE_BMM150
+  WDOG_CHECKPOINT(WDOG_CP_BMM150_INIT_START);
   bool bmm_ok = imu_bmm150_init();
+  WDOG_CHECKPOINT(WDOG_CP_BMM150_INIT_DONE);
   if (!bmm_ok) {
     APP_LOG_ERROR("BMM150 init failed");
   }
+  sensors_ok &= bmm_ok;
+#endif
 
-  if (bmi_ok && icm_ok && bmm_ok) {
+  if (SENSOR_ENABLED_COUNT == 0) {
+    APP_LOG_ERROR("No IMU sensors enabled");
+  } else if (sensors_ok) {
+    /*
+     * EXTI Re-enable after IMU Init:
+     * IMU EXTI interrupts were disabled in main.c to prevent race conditions
+     * during cold boot. Now that sensors are initialized and the scheduler
+     * is ready, clear any pending interrupts and re-enable EXTI.
+     */
+#if SENSOR_ENABLE_ICM42688
+    __HAL_GPIO_EXTI_CLEAR_IT(ICM42688_INT1_Pin);
+#endif
+#if SENSOR_ENABLE_BMI270
+    __HAL_GPIO_EXTI_CLEAR_IT(BMI270_INT1_Pin);
+#endif
+#if SENSOR_ENABLE_BMM150
+    __HAL_GPIO_EXTI_CLEAR_IT(BMM150_INT1_Pin);
+#endif
+
+#if SENSOR_ENABLE_ICM42688
+    HAL_NVIC_EnableIRQ(ICM42688_INT1_EXTI_IRQn);
+#endif
+#if SENSOR_ENABLE_BMI270
+    HAL_NVIC_EnableIRQ(BMI270_INT1_EXTI_IRQn);
+#endif
+#if SENSOR_ENABLE_BMM150
+    HAL_NVIC_EnableIRQ(BMM150_INT1_EXTI_IRQn);
+#endif
+    WDOG_CHECKPOINT(WDOG_CP_EXTI_ENABLE);
+
+    /*
+     * Cold Boot Stabilization:
+     * After enabling EXTI, give sensors time to generate their first
+     * valid data-ready interrupt. On cold boot, sensors may need
+     * additional settling time before DMA reads succeed reliably.
+     */
+    HAL_Delay(100);
+
     imu_bus_set_ready(1U);
-    imu_sched_request(IMU_SCHED_SENSOR_BMI270);
-    imu_sched_request(IMU_SCHED_SENSOR_ICM42688);
-    imu_sched_request(IMU_SCHED_SENSOR_BMM150);
+#define SENSOR_REQUEST_ENTRY(name, short_name, prefix) \
+    imu_sched_request(IMU_SCHED_SENSOR_##name);
+    SENSOR_LIST_ENABLED(SENSOR_REQUEST_ENTRY)
+#undef SENSOR_REQUEST_ENTRY
     imu_sched_run();
   } else {
     APP_LOG_ERROR("IMU bus not ready; one or more inits failed");
   }
+
+#ifdef ENABLE_MOTORS
+  WDOG_CHECKPOINT(WDOG_CP_MOTOR_INIT);
+  if (!motor_link_init()) {
+    APP_LOG_ERROR("Motor link init failed");
+  }
+#endif
+  robot_mux_init(&s_mux);
+  robot_mux_register(&s_mux, ROBOT_CHANNEL_CMD, app_cmd_handler, NULL);
+  app_link_start();
+
 }
 
 static void app_idle_tick(void) {
+  /* Refresh watchdog at start of each idle tick */
+  debug_wdog_refresh();
+  WDOG_CHECKPOINT(WDOG_CP_IDLE_LOOP);
+  app_link_poll();
+
   uint32_t now = HAL_GetTick();
   if ((now - s_last_telem_ms) >= APP_TELEM_PERIOD_MS) {
     app_send_telem();
     s_last_telem_ms = now;
   }
-
+#ifdef ENABLE_MOTORS
+  motor_link_poll();
+#endif
   imu_sched_tick();
+#if SENSOR_ENABLE_BMM150
+  imu_bmm150_poll();
+#endif
 
   // if ((now - s_last_cmd_ms) > APP_HEARTBEAT_TIMEOUT_MS) {
   //   APP_LOG_ERROR("Link heartbeat timeout");
@@ -146,35 +242,80 @@ static void app_idle_tick(void) {
   // }
   if ((now - s_last_log_ms) >= APP_LOG_PERIOD_MS) {
     s_last_log_ms = now;
-    imu_bmi270_sample_t bmi_sample;
-    if (imu_bmi270_try_get_latest(&bmi_sample, &s_bmi_seq)) {
-      APP_LOG_INFO("BMI270 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
-                   "%ld temp=%ld",
-                   (long)bmi_sample.accel[0], (long)bmi_sample.accel[1],
-                   (long)bmi_sample.accel[2], (long)bmi_sample.gyro[0],
-                   (long)bmi_sample.gyro[1], (long)bmi_sample.gyro[2],
-                   (long)bmi_sample.temperature);
-    }
+    app_log_sensors();
+    app_log_link_errors();
 
-    imu_icm42688_sample_t imu_sample;
-    if (imu_icm42688_try_get_latest(&imu_sample, &s_imu_seq)) {
-      APP_LOG_INFO("ICM42688 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
-                   "%ld temp=%ld",
-                   (long)imu_sample.accel[0], (long)imu_sample.accel[1],
-                   (long)imu_sample.accel[2], (long)imu_sample.gyro[0],
-                   (long)imu_sample.gyro[1], (long)imu_sample.gyro[2],
-                   (long)imu_sample.temperature);
-    }
-
-    imu_bmm150_sample_t bmm_sample;
-    if (imu_bmm150_try_get_latest(&bmm_sample, &s_bmm_seq)) {
-      APP_LOG_INFO("BMM150 mag [uT] = %ld, %ld, %ld", (long)bmm_sample.mag[0],
-                   (long)bmm_sample.mag[1], (long)bmm_sample.mag[2]);
-    }
+#ifdef ENABLE_MOTORS
+    float left_vel = 0.0f;
+    float right_vel = 0.0f;
+    bool motor_ok = motor_link_get_wheel_velocities(&left_vel, &right_vel);
+    APP_LOG_INFO("Motor telemetry vel [rad/s] L=%.3f R=%.3f ok=%u",
+                 (double)left_vel, (double)right_vel, motor_ok ? 1U : 0U);
+    APP_LOG_INFO(
+        "Motor diag drops L=%lu R=%lu stale L=%lu R=%lu late L=%lu R=%lu",
+        (unsigned long)motor_link_get_left_parser_drops(),
+        (unsigned long)motor_link_get_right_parser_drops(),
+        (unsigned long)motor_link_get_left_telem_stale(),
+        (unsigned long)motor_link_get_right_telem_stale(),
+        (unsigned long)motor_link_get_left_telem_late(),
+        (unsigned long)motor_link_get_right_telem_late());
+#endif
   }
 
-  HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
-  HAL_Delay(APP_IDLE_TICK_MS);
+  if ((now - s_last_led_ms) >= APP_IDLE_TICK_MS) {
+    s_last_led_ms = now;
+    HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
+  }
+}
+
+static bool app_in_isr(void) {
+  return (__get_IPSR() != 0U);
+}
+
+#if SENSOR_ENABLE_BMI270
+static void app_log_bmi270(void) {
+  imu_bmi270_sample_t sample;
+  if (imu_bmi270_try_get_latest(&sample, &s_bmi_seq)) {
+    APP_LOG_INFO("BMI270 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
+                 "%ld temp=%ld",
+                 (long)sample.accel[0], (long)sample.accel[1],
+                 (long)sample.accel[2], (long)sample.gyro[0],
+                 (long)sample.gyro[1], (long)sample.gyro[2],
+                 (long)sample.temperature);
+  }
+}
+#endif
+
+#if SENSOR_ENABLE_ICM42688
+static void app_log_icm42688(void) {
+  imu_icm42688_sample_t sample;
+  if (imu_icm42688_try_get_latest(&sample, &s_imu_seq)) {
+    APP_LOG_INFO("ICM42688 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
+                 "%ld temp=%ld",
+                 (long)sample.accel[0], (long)sample.accel[1],
+                 (long)sample.accel[2], (long)sample.gyro[0],
+                 (long)sample.gyro[1], (long)sample.gyro[2],
+                 (long)sample.temperature);
+  }
+}
+#endif
+
+#if SENSOR_ENABLE_BMM150
+static void app_log_bmm150(void) {
+  imu_bmm150_sample_t sample;
+  if (imu_bmm150_try_get_latest(&sample, &s_bmm_seq)) {
+    APP_LOG_INFO("BMM150 mag [uT] = %ld, %ld, %ld", (long)sample.mag[0],
+                 (long)sample.mag[1], (long)sample.mag[2]);
+  }
+}
+#endif
+
+static void app_log_sensors(void) {
+#if SENSOR_ENABLED_COUNT > 0
+#define SENSOR_LOG_ENTRY(name, short_name, prefix) app_log_##short_name();
+  SENSOR_LIST_ENABLED(SENSOR_LOG_ENTRY)
+#undef SENSOR_LOG_ENTRY
+#endif
 }
 
 static void app_link_start(void) {
@@ -191,6 +332,58 @@ static void app_link_start(void) {
   }
   __HAL_DMA_DISABLE_IT(APP_LINK_UART->hdmarx, DMA_IT_HT);
   s_uart_rx_last_pos = 0U;
+  s_uart_rx_event_pending = 0U;
+  s_uart_rx_pending_size = 0U;
+}
+
+static void app_link_poll(void) {
+  if (APP_LINK_UART == NULL) {
+    return;
+  }
+
+  if (app_link_dma_is_circular()) {
+    size_t buf_size = sizeof(s_uart_rx_buffer);
+    uint16_t remaining = __HAL_DMA_GET_COUNTER(APP_LINK_UART->hdmarx);
+    size_t pos = buf_size - (size_t)remaining;
+    if (pos >= buf_size) {
+      pos = 0U;
+    }
+    if (pos == s_uart_rx_last_pos) {
+      return;
+    }
+
+    app_link_invalidate_rx_cache(sizeof(s_uart_rx_buffer));
+    if (pos > s_uart_rx_last_pos) {
+      app_link_process_chunk(&s_uart_rx_buffer[s_uart_rx_last_pos],
+                             pos - s_uart_rx_last_pos);
+    } else {
+      app_link_process_chunk(&s_uart_rx_buffer[s_uart_rx_last_pos],
+                             buf_size - s_uart_rx_last_pos);
+      if (pos > 0U) {
+        app_link_process_chunk(&s_uart_rx_buffer[0], pos);
+      }
+    }
+    s_uart_rx_last_pos = pos;
+    return;
+  }
+
+  if (!s_uart_rx_event_pending) {
+    return;
+  }
+
+  __disable_irq();
+  uint16_t size = s_uart_rx_pending_size;
+  s_uart_rx_pending_size = 0U;
+  s_uart_rx_event_pending = 0U;
+  __enable_irq();
+
+  if (size == 0U) {
+    return;
+  }
+
+  app_link_invalidate_rx_cache(size);
+  app_link_process_chunk(s_uart_rx_buffer, size);
+  app_link_restart_rx();
 }
 
 static void app_link_restart_rx(void) {
@@ -215,7 +408,11 @@ static void app_link_process_chunk(const uint8_t *data, size_t len) {
     } else if (s_cobs_frame_len < sizeof(s_cobs_frame_buffer)) {
       s_cobs_frame_buffer[s_cobs_frame_len++] = byte;
     } else {
-      APP_LOG_ERROR("UART frame overflow, dropping data");
+      if (app_in_isr()) {
+        s_link_overflows++;
+      } else {
+        APP_LOG_ERROR("UART frame overflow, dropping data");
+      }
       s_cobs_frame_len = 0U;
     }
   }
@@ -246,8 +443,12 @@ static void app_link_handle_encoded_frame(const uint8_t *frame, size_t len) {
   encoded_buf[len] = 0x00U;
 
   if (!robot_frame_decode(encoded_buf, len + 1U, &decoded)) {
-    APP_LOG_ERROR("Frame decode failed (len=%u)", (unsigned int)len);
-    app_link_debug_frame(frame, len);
+    s_link_decode_failures++;
+    s_link_decode_last_len = (uint32_t)len;
+    if (!app_in_isr()) {
+      APP_LOG_ERROR("Frame decode failed (len=%u)", (unsigned int)len);
+      app_link_debug_frame(frame, len);
+    }
     return;
   }
 
@@ -409,7 +610,18 @@ static void app_cmd_handler(uint8_t msg_type, const uint8_t *payload,
     APP_LOG_INFO("Teleop fwd=%.2f turn=%.2f flags=0x%04x", (double)cmd->vx_mps,
                  (double)cmd->wz_radps, cmd->flags);
   } else if (msg_type == ROBOT_MSG_CMD_HEARTBEAT) {
-    APP_LOG_INFO("Heartbeat received");
+    // APP_LOG_INFO("Heartbeat received");
+  } else if (msg_type == ROBOT_MSG_CMD_REBOOT) {
+    uint8_t mode = (len > 0U) ? payload[0] : 0U;
+    if (mode == 1U) {
+      APP_LOG_INFO("Reboot to bootloader requested");
+      HAL_Delay(50U); /* Allow log/response to flush */
+      system_reboot_to_bootloader();
+    } else {
+      APP_LOG_INFO("Normal reboot requested");
+      HAL_Delay(50U);
+      system_reboot();
+    }
   } else {
     APP_LOG_INFO("CMD handler invoked, msg_type=0x%02x", msg_type);
   }
@@ -420,53 +632,20 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size) {
     return;
   }
   if (app_link_dma_is_circular()) {
-    app_link_invalidate_rx_cache(sizeof(s_uart_rx_buffer));
-    HAL_UART_RxEventTypeTypeDef evt = HAL_UARTEx_GetRxEventType(huart);
-    size_t buf_size = sizeof(s_uart_rx_buffer);
-    uint16_t remaining = __HAL_DMA_GET_COUNTER(huart->hdmarx);
-    size_t pos = buf_size - (size_t)remaining;
-    if (pos >= buf_size) {
-      pos = 0U;
-    }
-
-    if (evt == HAL_UART_RXEVENT_TC) {
-      if (s_uart_rx_last_pos < buf_size) {
-        app_link_process_chunk(&s_uart_rx_buffer[s_uart_rx_last_pos],
-                               buf_size - s_uart_rx_last_pos);
-      }
-      if (s_uart_rx_last_pos > 0U) {
-        app_link_process_chunk(&s_uart_rx_buffer[0], s_uart_rx_last_pos);
-      }
-      s_uart_rx_last_pos = pos;
-      return;
-    }
-
-    if (pos != s_uart_rx_last_pos) {
-      if (pos > s_uart_rx_last_pos) {
-        app_link_process_chunk(&s_uart_rx_buffer[s_uart_rx_last_pos],
-                               pos - s_uart_rx_last_pos);
-      } else {
-        app_link_process_chunk(&s_uart_rx_buffer[s_uart_rx_last_pos],
-                               buf_size - s_uart_rx_last_pos);
-        if (pos > 0U) {
-          app_link_process_chunk(&s_uart_rx_buffer[0], pos);
-        }
-      }
-      s_uart_rx_last_pos = pos;
-    }
+    s_uart_rx_event_pending = 1U;
     return;
   }
 
-  app_link_invalidate_rx_cache(Size);
-  app_link_process_chunk(s_uart_rx_buffer, Size);
-  app_link_restart_rx();
+  s_uart_rx_pending_size = Size;
+  s_uart_rx_event_pending = 1U;
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
   if (huart != APP_LINK_UART) {
     return;
   }
-  APP_LOG_ERROR("UART error 0x%lx", (unsigned long)huart->ErrorCode);
+  s_link_uart_errors++;
+  s_link_uart_last_err = (uint32_t)huart->ErrorCode;
   if (app_link_dma_is_circular()) {
     (void)HAL_UART_AbortReceive(huart);
     app_link_clear_uart_errors(huart);
@@ -481,6 +660,37 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
   }
 
   app_link_restart_rx();
+}
+
+static void app_log_link_errors(void) {
+  uint32_t decode_fail = 0U;
+  uint32_t decode_len = 0U;
+  uint32_t overflow = 0U;
+  uint32_t uart_errs = 0U;
+  uint32_t uart_last = 0U;
+
+  __disable_irq();
+  decode_fail = s_link_decode_failures;
+  decode_len = s_link_decode_last_len;
+  s_link_decode_failures = 0U;
+  overflow = s_link_overflows;
+  s_link_overflows = 0U;
+  uart_errs = s_link_uart_errors;
+  uart_last = s_link_uart_last_err;
+  s_link_uart_errors = 0U;
+  __enable_irq();
+
+  if (decode_fail > 0U) {
+    APP_LOG_ERROR("Frame decode failed x%lu (last len=%lu)",
+                  (unsigned long)decode_fail, (unsigned long)decode_len);
+  }
+  if (overflow > 0U) {
+    APP_LOG_ERROR("UART frame overflow x%lu", (unsigned long)overflow);
+  }
+  if (uart_errs > 0U) {
+    APP_LOG_ERROR("UART error 0x%lx x%lu", (unsigned long)uart_last,
+                  (unsigned long)uart_errs);
+  }
 }
 
 static void app_link_clear_uart_errors(UART_HandleTypeDef *huart) {

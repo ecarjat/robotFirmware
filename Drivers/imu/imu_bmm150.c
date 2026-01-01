@@ -64,7 +64,7 @@ static BMM150_INTF_RET_TYPE bmm_spi_read(uint8_t reg_addr,
     uint8_t tx[BMM150_SPI_MAX_XFER + 1U];
     uint8_t rx[BMM150_SPI_MAX_XFER + 1U];
 
-    tx[0] = reg_addr;
+    tx[0] = reg_addr;  /* Note: bmm150_get_regs() already adds 0x80 for SPI reads */
     memset(&tx[1], 0x00, len);
 
     if (spi_bus_transfer_blocking(dev, tx, rx, len + 1U, BMM150_REG_TIMEOUT_MS) != 0)
@@ -244,6 +244,16 @@ bool imu_bmm150_init(void)
         return false;
     }
 
+    /* Re-apply NORMAL mode after preset config (preset may have changed it) */
+    settings.pwr_mode = BMM150_CFG_PWR_MODE;
+    rslt = bmm150_set_op_mode(&settings, &s_bmm);
+    if (rslt != BMM150_OK)
+    {
+        APP_LOG_ERROR("BMM150 set op mode (final) failed rc=%d", rslt);
+        return false;
+    }
+
+    /* Configure interrupts AFTER operation mode is set */
     settings.int_settings.drdy_pin_en = BMM150_INT_ENABLE;
     settings.int_settings.drdy_polarity = BMM150_CFG_DRDY_POLARITY;
     settings.int_settings.int_pin_en = BMM150_INT_ENABLE;
@@ -260,6 +270,9 @@ bool imu_bmm150_init(void)
         APP_LOG_ERROR("BMM150 int config failed rc=%d", rslt);
         return false;
     }
+
+    /* Wait for first measurement to complete (REGULAR preset = 10Hz ODR = 100ms) */
+    HAL_Delay(120);
 
     s_init_ok = 1U;
     s_dma_inflight = 0U;

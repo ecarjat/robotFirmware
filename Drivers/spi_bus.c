@@ -6,14 +6,19 @@
 #define SPI_BUS_CACHE_LINE_BYTES 32U
 #define SPI_BUS_HAL_TIMEOUT_MS   50U
 
+/*
+ * Fields accessed from both thread and ISR context are marked volatile.
+ * hspi and config fields (cpol, cpha, etc.) are only modified during
+ * init/config in thread context, so they don't need volatile.
+ */
 typedef struct {
     SPI_HandleTypeDef *hspi;
-    spi_bus_device_t *active_dev;
-    const uint8_t *tx;
-    uint8_t *rx;
-    size_t len;
-    spi_bus_done_cb_t cb;
-    void *cb_ctx;
+    spi_bus_device_t * volatile active_dev;
+    const uint8_t * volatile tx;
+    uint8_t * volatile rx;
+    volatile size_t len;
+    volatile spi_bus_done_cb_t cb;
+    void * volatile cb_ctx;
     volatile uint8_t busy;
     uint32_t cpol;
     uint32_t cpha;
@@ -332,17 +337,22 @@ int spi_bus_transfer_blocking(spi_bus_device_t *dev,
     {
         return SPI_BUS_ARG;
     }
-    if (s_bus.busy)
+
+    /*
+     * Use atomic acquire to prevent race with DMA transfers.
+     * Same pattern as spi_bus_transfer_dma() for consistency.
+     */
+    if (__LDREXB(&s_bus.busy) || __STREXB(1U, &s_bus.busy))
     {
         return SPI_BUS_BUSY;
     }
 
     if (spi_bus_apply_config(dev) != SPI_BUS_OK)
     {
+        s_bus.busy = 0U;
         return SPI_BUS_ERR;
     }
 
-    s_bus.busy = 1U;
     s_bus.active_dev = dev;
 
     spi_bus_assert_cs(dev);

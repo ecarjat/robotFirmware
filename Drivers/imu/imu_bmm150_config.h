@@ -14,3 +14,4 @@
 #define BMM150_CFG_DMA_TIMEOUT_MS  0U
 
 #endif /* IMU_BMM150_CONFIG_H */
+

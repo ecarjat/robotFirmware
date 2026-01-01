@@ -2,23 +2,49 @@
 
 #include <string.h>
 
+#include "imu_bus.h"
+#include "imu_sched_config.h"
+#include "sensors.h"
+#if SENSOR_ENABLE_BMI270
 #include "imu_bmi270.h"
 #include "imu_bmi270_config.h"
-#include "imu_bmm150.h"
-#include "imu_bmm150_config.h"
-#include "imu_bus.h"
+#endif
+#if SENSOR_ENABLE_ICM42688
 #include "imu_icm42688.h"
 #include "imu_icm42688_config.h"
-#include "imu_sched_config.h"
+#endif
+#if SENSOR_ENABLE_BMM150
+#include "imu_bmm150.h"
+#include "imu_bmm150_config.h"
+#endif
 #include "spi_bus.h"
 #include "stm32h7xx_hal.h"
 
 typedef bool (*imu_sched_kick_fn_t)(void);
 
+#if SENSOR_ENABLED_COUNT < 3
+static bool imu_sched_kick_disabled(void)
+{
+    return false;
+}
+#endif
+
 static const imu_sched_kick_fn_t s_kick_fns[IMU_SCHED_SENSOR_COUNT] = {
+#if SENSOR_ENABLE_BMI270
     imu_bmi270_kick,
+#else
+    imu_sched_kick_disabled,
+#endif
+#if SENSOR_ENABLE_ICM42688
     imu_icm42688_kick,
+#else
+    imu_sched_kick_disabled,
+#endif
+#if SENSOR_ENABLE_BMM150
     imu_bmm150_kick
+#else
+    imu_sched_kick_disabled
+#endif
 };
 
 static volatile uint32_t s_pending_mask = 0U;
@@ -30,6 +56,7 @@ static volatile int8_t s_active_sensor = -1;
 static volatile uint32_t s_active_start_ms = 0U;
 static uint8_t s_rr_cursor = 0U;
 static volatile uint8_t s_running = 0U;
+static uint32_t s_enabled_mask = 0U;
 
 static uint32_t imu_sched_mask(imu_sched_sensor_t sensor)
 {
@@ -117,12 +144,22 @@ void imu_sched_init(void)
     s_running = 0U;
     s_active_sensor = -1;
     s_active_start_ms = 0U;
+    s_enabled_mask = 0U;
+#if SENSOR_ENABLE_BMI270
+    s_enabled_mask |= imu_sched_mask(IMU_SCHED_SENSOR_BMI270);
     s_min_interval_ms[IMU_SCHED_SENSOR_BMI270] = IMU_SCHED_BMI270_MIN_INTERVAL_MS;
-    s_min_interval_ms[IMU_SCHED_SENSOR_ICM42688] = IMU_SCHED_ICM42688_MIN_INTERVAL_MS;
-    s_min_interval_ms[IMU_SCHED_SENSOR_BMM150] = IMU_SCHED_BMM150_MIN_INTERVAL_MS;
     s_timeout_ms[IMU_SCHED_SENSOR_BMI270] = BMI270_CFG_DMA_TIMEOUT_MS;
+#endif
+#if SENSOR_ENABLE_ICM42688
+    s_enabled_mask |= imu_sched_mask(IMU_SCHED_SENSOR_ICM42688);
+    s_min_interval_ms[IMU_SCHED_SENSOR_ICM42688] = IMU_SCHED_ICM42688_MIN_INTERVAL_MS;
     s_timeout_ms[IMU_SCHED_SENSOR_ICM42688] = ICM42688_CFG_DMA_TIMEOUT_MS;
+#endif
+#if SENSOR_ENABLE_BMM150
+    s_enabled_mask |= imu_sched_mask(IMU_SCHED_SENSOR_BMM150);
+    s_min_interval_ms[IMU_SCHED_SENSOR_BMM150] = IMU_SCHED_BMM150_MIN_INTERVAL_MS;
     s_timeout_ms[IMU_SCHED_SENSOR_BMM150] = BMM150_CFG_DMA_TIMEOUT_MS;
+#endif
 }
 
 void imu_sched_set_min_interval(imu_sched_sensor_t sensor, uint32_t min_interval_ms)
@@ -149,12 +186,20 @@ void imu_sched_request(imu_sched_sensor_t sensor)
     {
         return;
     }
+    if ((s_enabled_mask & imu_sched_mask(sensor)) == 0U)
+    {
+        return;
+    }
     imu_sched_set_pending(sensor, HAL_GetTick());
 }
 
 void imu_sched_on_dma_done(imu_sched_sensor_t sensor, int status)
 {
     if (sensor >= IMU_SCHED_SENSOR_COUNT)
+    {
+        return;
+    }
+    if ((s_enabled_mask & imu_sched_mask(sensor)) == 0U)
     {
         return;
     }
@@ -184,7 +229,7 @@ void imu_sched_run(void)
         return;
     }
 
-    uint32_t pending = s_pending_mask;
+    uint32_t pending = s_pending_mask & s_enabled_mask;
     if (pending == 0U)
     {
         s_running = 0U;
@@ -237,6 +282,7 @@ void imu_sched_tick(void)
         return;
     }
 
+#if SENSOR_ENABLE_BMM150
     if (BMM150_CFG_FALLBACK_POLL_MS > 0U)
     {
         uint32_t now_ms = HAL_GetTick();
@@ -251,6 +297,7 @@ void imu_sched_tick(void)
             imu_sched_set_pending(IMU_SCHED_SENSOR_BMM150, now_ms);
         }
     }
+#endif
 
     if (!spi_bus_is_busy())
     {
