@@ -142,6 +142,9 @@ int main(void)
   /* Enable I-Cache---------------------------------------------------------*/
   SCB_EnableICache();
 
+  /* Enable D-Cache---------------------------------------------------------*/
+  SCB_EnableDCache();
+
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
@@ -447,7 +450,7 @@ static void MX_IWDG1_Init(void)
   /* USER CODE END IWDG1_Init 1 */
   hiwdg1.Instance = IWDG1;
   hiwdg1.Init.Prescaler = IWDG_PRESCALER_256;
-  hiwdg1.Init.Window = IWDG_WINDOW_DISABLE;
+  hiwdg1.Init.Window = 500;
   hiwdg1.Init.Reload = 500;
   if (HAL_IWDG_Init(&hiwdg1) != HAL_OK)
   {

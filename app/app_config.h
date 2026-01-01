@@ -10,6 +10,10 @@
 #define APP_LOG_RING_BYTES 2048U
 #define APP_LOG_USB_CHUNK_BYTES 256U
 
+#ifndef DEBUG_FAULTS
+#define DEBUG_FAULTS 0
+#endif
+
 extern USBD_HandleTypeDef hUsbDeviceHS;
 extern UART_HandleTypeDef huart2;
 extern CRC_HandleTypeDef hcrc;
