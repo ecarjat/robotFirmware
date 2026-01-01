@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "serena": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/Users/emmanuelcarjat/git/serena/",
+        "serena",
+        "start-mcp-server",
+        "--context",
+        "claude-code",
+        "--project",
+        "/Users/emmanuelcarjat/git/robot2Wheel/stm32Controller/firmware"
+      ],
+      "env": {}
+    }
+  }
+}
