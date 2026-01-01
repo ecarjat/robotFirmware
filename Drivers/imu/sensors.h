@@ -1,0 +1,44 @@
+#ifndef SENSORS_H
+#define SENSORS_H
+
+/* Enable/disable sensors here (1 = enabled, 0 = disabled). */
+#ifndef SENSOR_ENABLE_BMI270
+#define SENSOR_ENABLE_BMI270 1
+#endif
+
+#ifndef SENSOR_ENABLE_ICM42688
+#define SENSOR_ENABLE_ICM42688 1
+#endif
+
+#ifndef SENSOR_ENABLE_BMM150
+#define SENSOR_ENABLE_BMM150 1
+#endif
+
+#define SENSOR_ENABLED_COUNT \
+    (SENSOR_ENABLE_BMI270 + SENSOR_ENABLE_ICM42688 + SENSOR_ENABLE_BMM150)
+
+/* X-macro list of enabled sensors. */
+#if SENSOR_ENABLE_BMI270
+#define SENSOR_LIST_ENABLED_BMI270(X) X(BMI270, bmi270, imu_bmi270)
+#else
+#define SENSOR_LIST_ENABLED_BMI270(X)
+#endif
+
+#if SENSOR_ENABLE_ICM42688
+#define SENSOR_LIST_ENABLED_ICM42688(X) X(ICM42688, icm42688, imu_icm42688)
+#else
+#define SENSOR_LIST_ENABLED_ICM42688(X)
+#endif
+
+#if SENSOR_ENABLE_BMM150
+#define SENSOR_LIST_ENABLED_BMM150(X) X(BMM150, bmm150, imu_bmm150)
+#else
+#define SENSOR_LIST_ENABLED_BMM150(X)
+#endif
+
+#define SENSOR_LIST_ENABLED(X)        \
+    SENSOR_LIST_ENABLED_BMI270(X)     \
+    SENSOR_LIST_ENABLED_ICM42688(X)   \
+    SENSOR_LIST_ENABLED_BMM150(X)
+
+#endif /* SENSORS_H */
