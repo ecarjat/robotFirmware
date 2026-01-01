@@ -92,12 +92,21 @@ static uint32_t param_get_sector(uint32_t address)
 
 /**
  * @brief Erase the parameter sector
+ *
+ * Interrupts are disabled during the erase operation because:
+ * 1. STM32H7 flash operations block code execution from the same bank
+ * 2. If ISRs reside in Bank 1 (common), they cannot execute during erase
+ * 3. This prevents system hangs from missed interrupts or flash errors
  */
 static int param_erase_sector(void)
 {
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
     HAL_StatusTypeDef status = HAL_FLASH_Unlock();
     if (status != HAL_OK)
     {
+        __set_PRIMASK(primask);
         return PARAM_ERR_FLASH;
     }
 
@@ -112,6 +121,7 @@ static int param_erase_sector(void)
     status = HAL_FLASHEx_Erase(&erase, &sector_error);
 
     HAL_FLASH_Lock();
+    __set_PRIMASK(primask);
 
     if (status != HAL_OK)
     {
@@ -124,6 +134,9 @@ static int param_erase_sector(void)
 
 /**
  * @brief Program data to flash (must be 32-byte aligned)
+ *
+ * Interrupts are disabled during programming for the same reasons as erase.
+ * Programming is faster than erase, but still blocks Bank 1 execution.
  */
 static int param_program(uint32_t address, const uint8_t *data, uint32_t length)
 {
@@ -132,9 +145,13 @@ static int param_program(uint32_t address, const uint8_t *data, uint32_t length)
         return PARAM_ERR_FLASH;
     }
 
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
     HAL_StatusTypeDef status = HAL_FLASH_Unlock();
     if (status != HAL_OK)
     {
+        __set_PRIMASK(primask);
         return PARAM_ERR_FLASH;
     }
 
@@ -142,6 +159,7 @@ static int param_program(uint32_t address, const uint8_t *data, uint32_t length)
     uint32_t write_addr = address;
     const uint8_t *src = data;
     uint32_t flashword[PARAM_FLASHWORD_SIZE / sizeof(uint32_t)];
+    int result = PARAM_OK;
 
     while (remaining > 0U)
     {
@@ -156,8 +174,8 @@ static int param_program(uint32_t address, const uint8_t *data, uint32_t length)
                                    write_addr, (uint32_t)flashword);
         if (status != HAL_OK)
         {
-            HAL_FLASH_Lock();
-            return PARAM_ERR_FLASH;
+            result = PARAM_ERR_FLASH;
+            break;
         }
 
         write_addr += PARAM_FLASHWORD_SIZE;
@@ -166,8 +184,13 @@ static int param_program(uint32_t address, const uint8_t *data, uint32_t length)
     }
 
     HAL_FLASH_Lock();
-    param_cache_invalidate(address, length);
-    return PARAM_OK;
+    __set_PRIMASK(primask);
+
+    if (result == PARAM_OK)
+    {
+        param_cache_invalidate(address, length);
+    }
+    return result;
 }
 
 /**
