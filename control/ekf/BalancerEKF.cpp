@@ -130,18 +130,27 @@ bool BalancerEKF::step(float thetaAcc, float vEnc, float posEnc, float gyroPitch
     H[1 * EKF_N + 3] = 1.0f;
     H[2 * EKF_N + 2] = 1.0f;
 
+    bool vel_valid = isfinite(vEnc);
+    bool pos_valid = isfinite(posEnc);
+
     float z[EKF_M];
     z[0] = thetaAcc;
     z[1] = vEnc;
     z[2] = posEnc;
 
-    // If any measurement is invalid (NaN), replace it with the predicted value so the innovation is zero,
-    // effectively skipping that measurement update while still advancing the process model.
-    if (!isfinite(z[1])) {
+    // If a measurement is invalid (NaN), replace it with the predicted value and
+    // zero the corresponding H row so the update truly skips that channel.
+    if (!vel_valid) {
         z[1] = hx[1];
+        for (int i = 0; i < EKF_N; ++i) {
+            H[1 * EKF_N + i] = 0.0f;
+        }
     }
-    if (!isfinite(z[2])) {
+    if (!pos_valid) {
         z[2] = hx[2];
+        for (int i = 0; i < EKF_N; ++i) {
+            H[2 * EKF_N + i] = 0.0f;
+        }
     }
 
     // Innovation gating
@@ -153,7 +162,8 @@ bool BalancerEKF::step(float thetaAcc, float vEnc, float posEnc, float gyroPitch
         fabsf(innov_vel) > EKF_INNOV_VEL_MAX_MPS ||
         fabsf(innov_pos) > EKF_INNOV_POS_MAX_M;
     if (bad_innov) {
-        reset(thetaAcc, posEnc);
+        float pos_reset = pos_valid ? posEnc : pos;
+        reset(thetaAcc, pos_reset);
         diag_valid_ = false;
         return false;
     }
@@ -162,6 +172,12 @@ bool BalancerEKF::step(float thetaAcc, float vEnc, float posEnc, float gyroPitch
     float R_step[EKF_M * EKF_M];
     memcpy(R_step, R_, sizeof(R_step));
     R_step[0] = measurement_var;
+    if (!vel_valid) {
+        R_step[1 * EKF_M + 1] = 1e6f;
+    }
+    if (!pos_valid) {
+        R_step[2 * EKF_M + 2] = 1e6f;
+    }
 
     float p00 = ekf_.P[0 * EKF_N + 0];
     float p40 = ekf_.P[4 * EKF_N + 0];

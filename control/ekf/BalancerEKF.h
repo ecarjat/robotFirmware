@@ -7,7 +7,7 @@
 
 #include <stdint.h>
 #include <math.h>
-// #include "tinyekf.h"
+#include "tinyekf.h"
 
 struct BalancerState {
     float theta;      // rad
