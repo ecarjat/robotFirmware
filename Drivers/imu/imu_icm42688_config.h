@@ -4,11 +4,11 @@
 /* ICM42688 bring-up configuration */
 #define ICM42688_CFG_PWR_MGMT0      0x0FU
 
-#define ICM42688_CFG_ACC_ODR        0x07U  /* 200 Hz */
-#define ICM42688_CFG_ACC_FS         0x00U  /* +/-16g */
+#define ICM42688_CFG_ACC_ODR        0x0FU  /* 500 Hz (closest to 400 Hz) */
+#define ICM42688_CFG_ACC_FS         0x02U  /* +/-4g */
 
-#define ICM42688_CFG_GYR_ODR        0x07U  /* 200 Hz */
-#define ICM42688_CFG_GYR_FS         0x00U  /* +/-2000 dps */
+#define ICM42688_CFG_GYR_ODR        0x06U  /* 1 kHz (closest to 800 Hz) */
+#define ICM42688_CFG_GYR_FS         0x02U  /* +/-500 dps */
 
 #define ICM42688_CFG_INT_CONFIG     0x1BU
 #define ICM42688_CFG_INT_SOURCE0    0x18U  /* UI DRDY on INT1 */

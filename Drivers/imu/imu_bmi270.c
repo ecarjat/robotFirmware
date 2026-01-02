@@ -35,6 +35,8 @@ static volatile uint32_t s_irq_seen = 0U;
 static uint8_t s_irq_logged = 0U;
 static uint8_t s_irq_missing_logged = 0U;
 static uint32_t s_init_ms = 0U;
+static volatile uint32_t s_last_irq_ms = 0U;
+static uint32_t s_dma_timestamp_ms = 0U;
 static uint8_t s_data_tx[BMI270_DMA_FRAME_LEN] __attribute__((section(".bdma_buffer"), aligned(32)));
 static uint8_t s_data_rx[BMI270_DMA_FRAME_LEN] __attribute__((section(".bdma_buffer"), aligned(32)));
 
@@ -136,7 +138,7 @@ static void bmi_parse_sample(const uint8_t *data, imu_bmi270_sample_t *sample)
         return;
     }
 
-    sample->timestamp_ms = HAL_GetTick();
+    sample->timestamp_ms = s_dma_timestamp_ms;
     const uint8_t *acc = &data[BMI270_ACC_OFFSET];
     sample->accel[0] = (int16_t)((uint16_t)acc[1] << 8 | acc[0]);
     sample->accel[1] = (int16_t)((uint16_t)acc[3] << 8 | acc[2]);
@@ -170,6 +172,12 @@ static bool bmi_start_dma_read(void)
     if (__LDREXB(&s_dma_inflight) || __STREXB(1U, &s_dma_inflight))
     {
         return false;
+    }
+
+    s_dma_timestamp_ms = s_last_irq_ms;
+    if (s_dma_timestamp_ms == 0U)
+    {
+        s_dma_timestamp_ms = HAL_GetTick();
     }
 
     int rc = spi_bus_transfer_dma(&s_bmi_spi, s_data_tx, s_data_rx, sizeof(s_data_tx), bmi_dma_done, NULL);
@@ -300,6 +308,8 @@ bool imu_bmi270_init(void)
     s_irq_logged = 0U;
     s_irq_missing_logged = 0U;
     s_init_ms = HAL_GetTick();
+    s_last_irq_ms = 0U;
+    s_dma_timestamp_ms = 0U;
 
     APP_LOG_INFO("BMI270 initialized (SPI6)");
     return true;
@@ -311,6 +321,7 @@ void imu_bmi270_handle_int1(void)
     {
         return;
     }
+    s_last_irq_ms = HAL_GetTick();
     s_irq_seen++;
     imu_sched_request(IMU_SCHED_SENSOR_BMI270);
 }

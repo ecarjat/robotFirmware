@@ -32,6 +32,8 @@ static volatile uint32_t s_irq_seen = 0U;
 static uint8_t s_irq_logged = 0U;
 static uint8_t s_irq_missing_logged = 0U;
 static uint32_t s_init_ms = 0U;
+static volatile uint32_t s_last_irq_ms = 0U;
+static uint32_t s_dma_timestamp_ms = 0U;
 
 static uint8_t s_data_tx[BMM150_DMA_FRAME_LEN] __attribute__((section(".bdma_buffer"), aligned(32)));
 static uint8_t s_data_rx[BMM150_DMA_FRAME_LEN] __attribute__((section(".bdma_buffer"), aligned(32)));
@@ -143,7 +145,7 @@ static bool bmm_parse_sample(const uint8_t *data, imu_bmm150_sample_t *sample)
         return false;
     }
 
-    sample->timestamp_ms = HAL_GetTick();
+    sample->timestamp_ms = s_dma_timestamp_ms;
     sample->mag[0] = (int16_t)mag.x;
     sample->mag[1] = (int16_t)mag.y;
     sample->mag[2] = (int16_t)mag.z;
@@ -174,6 +176,12 @@ static bool bmm_start_dma_read(void)
     if (__LDREXB(&s_dma_inflight) || __STREXB(1U, &s_dma_inflight))
     {
         return false;
+    }
+
+    s_dma_timestamp_ms = s_last_irq_ms;
+    if (s_dma_timestamp_ms == 0U)
+    {
+        s_dma_timestamp_ms = HAL_GetTick();
     }
 
     int rc = spi_bus_transfer_dma(&s_bmm_spi, s_data_tx, s_data_rx, sizeof(s_data_tx), bmm_dma_done, NULL);
@@ -284,6 +292,8 @@ bool imu_bmm150_init(void)
     s_irq_logged = 0U;
     s_irq_missing_logged = 0U;
     s_init_ms = HAL_GetTick();
+    s_last_irq_ms = 0U;
+    s_dma_timestamp_ms = 0U;
 
     APP_LOG_INFO("BMM150 initialized (SPI6 + DMA)");
     return true;
@@ -295,6 +305,7 @@ void imu_bmm150_handle_int1(void)
     {
         return;
     }
+    s_last_irq_ms = HAL_GetTick();
     s_irq_seen++;
     imu_sched_request(IMU_SCHED_SENSOR_BMM150);
 }

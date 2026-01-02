@@ -42,6 +42,8 @@ static volatile uint32_t s_irq_seen = 0U;
 static uint8_t s_irq_logged = 0U;
 static uint8_t s_irq_missing_logged = 0U;
 static uint32_t s_init_ms = 0U;
+static volatile uint32_t s_last_irq_ms = 0U;
+static uint32_t s_dma_timestamp_ms = 0U;
 
 static uint8_t s_data_tx[ICM42688_DATA_FRAME_LEN] __attribute__((section(".bdma_buffer"), aligned(32)));
 static uint8_t s_data_rx[ICM42688_DATA_FRAME_LEN] __attribute__((section(".bdma_buffer"), aligned(32)));
@@ -146,7 +148,7 @@ static void icm_parse_sample(const uint8_t *data, imu_icm42688_sample_t *sample)
     }
 
     memset(sample, 0, sizeof(*sample));
-    sample->timestamp_ms = HAL_GetTick();
+    sample->timestamp_ms = s_dma_timestamp_ms;
 
     sample->temperature = (int16_t)((data[0] << 8) | data[1]);
     sample->accel[0] = (int16_t)((data[2] << 8) | data[3]);
@@ -189,6 +191,12 @@ static bool icm_start_dma_read(void)
     if (__LDREXB(&s_dma_inflight) || __STREXB(1U, &s_dma_inflight))
     {
         return false;
+    }
+
+    s_dma_timestamp_ms = s_last_irq_ms;
+    if (s_dma_timestamp_ms == 0U)
+    {
+        s_dma_timestamp_ms = HAL_GetTick();
     }
 
     int rc = spi_bus_transfer_dma(&s_icm_spi, s_data_tx, s_data_rx, sizeof(s_data_tx), icm_dma_done, NULL);
@@ -311,6 +319,8 @@ bool imu_icm42688_init(void)
     s_irq_logged = 0U;
     s_irq_missing_logged = 0U;
     s_init_ms = HAL_GetTick();
+    s_last_irq_ms = 0U;
+    s_dma_timestamp_ms = 0U;
 
     APP_LOG_INFO("ICM42688 initialized (SPI6 + DMA)");
     return true;
@@ -322,6 +332,7 @@ void imu_icm42688_handle_int1(void)
     {
         return;
     }
+    s_last_irq_ms = HAL_GetTick();
     s_irq_seen++;
     imu_sched_request(IMU_SCHED_SENSOR_ICM42688);
 }
