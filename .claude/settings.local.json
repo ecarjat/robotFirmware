@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cube-cmake --build:*)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(xargs ls:*)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "serena"
+  ]
+}

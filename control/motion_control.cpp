@@ -209,6 +209,16 @@ void motion_control_set_output_enabled(bool enabled)
     s_output_enabled = enabled;
 }
 
+uint32_t motion_control_get_last_imu_ok_ms(void)
+{
+    return s_last_imu_ok_ms;
+}
+
+uint32_t motion_control_get_last_motor_ok_ms(void)
+{
+    return s_last_motor_ok_ms;
+}
+
 /**
  * @brief Check if IMU calibration has been performed
  *

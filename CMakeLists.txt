@@ -58,6 +58,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     control/ekf/BalancerEKF.cpp
     control/motion_modes.cpp
     control/motion_control.cpp
+    control/control_timer.c
     drivers/imu/imu_bus.c
     drivers/imu/imu_bmi270.c
     drivers/imu/imu_bmm150.c

@@ -18,6 +18,7 @@
 #include "param_storage.h"
 #include "sensors.h"
 #include "config_control.h"
+#include "control_timer.h"
 #if SENSOR_ENABLE_BMI270
 #include "imu_bmi270.h"
 #endif
@@ -167,7 +168,8 @@ static uint32_t s_last_telem_ms = 0U;
 static uint32_t s_last_cmd_ms = 0U;
 static uint32_t s_last_log_ms = 0U;
 static uint32_t s_last_led_ms = 0U;
-static uint32_t s_last_control_ms = 0U;
+static uint8_t s_estop_active = 0U;
+static uint8_t s_last_teleop_flags = 0U;
 static uint8_t s_last_imu_active = 0xFFU;
 static uint8_t s_last_imu_active_valid = 0U;
 static uint32_t s_imu_seq = 0U;
@@ -305,6 +307,9 @@ static void app_init(void) {
   robot_mux_register(&s_mux, ROBOT_CHANNEL_CMD, app_cmd_handler, NULL);
   app_link_start();
 
+  /* Initialize and start control timer for 1ms control loop */
+  control_timer_init();
+  control_timer_start();
 }
 
 static void app_idle_tick(void) {
@@ -321,18 +326,13 @@ static void app_idle_tick(void) {
 #ifdef ENABLE_MOTORS
   motor_link_poll();
 #endif
-  float control_hz = g_robot_params.control_rate_hz;
-  if (control_hz <= 1.0f) {
-    control_hz = CONTROL_DEFAULT_HZ;
-  }
-  uint32_t control_period_ms = (uint32_t)(1000.0f / control_hz);
-  if (control_period_ms == 0U) {
-    control_period_ms = 1U;
-  }
-  if ((now - s_last_control_ms) >= control_period_ms) {
-    s_last_control_ms = now;
+
+  /* Timer-driven control loop: run when TIM2 fires (1kHz) */
+  if (control_timer_pending()) {
+    control_timer_begin_cycle();
     motion_control_tick(now);
     app_motor_manual_apply();
+    control_timer_end_cycle();
   }
   imu_sched_tick();
 // #if SENSOR_ENABLE_BMM150
@@ -1366,7 +1366,42 @@ static void app_cmd_handler(uint8_t msg_type, const uint8_t *payload,
       return;
     }
     const robot_cmd_teleop_t *cmd = (const robot_cmd_teleop_t *)payload;
-    motion_control_set_teleop(cmd->vx_mps, cmd->wz_radps);
+    uint8_t flags = cmd->flags;
+    bool estop = (flags & ROBOT_TELEOP_FLAG_ESTOP) != 0U;
+    bool arm = (flags & ROBOT_TELEOP_FLAG_ARM) != 0U;
+    uint8_t rising = (uint8_t)(flags & (uint8_t)~s_last_teleop_flags);
+    bool estop_rise = (rising & ROBOT_TELEOP_FLAG_ESTOP) != 0U;
+    bool arm_rise = (rising & ROBOT_TELEOP_FLAG_ARM) != 0U;
+    bool mode_cycle_rise = (rising & ROBOT_TELEOP_FLAG_MODE_CYCLE) != 0U;
+    s_last_teleop_flags = flags;
+
+    s_estop_active = estop ? 1U : 0U;
+    if (estop) {
+      if (estop_rise) {
+        APP_LOG_INFO("Teleop estop requested");
+      }
+      motion_control_set_mode(MOTION_MODE_DISARMED);
+#ifdef ENABLE_MOTORS
+      motor_link_enable(false);
+#endif
+      motion_control_set_teleop(0.0f, 0.0f);
+    } else {
+      if (arm_rise) {
+        APP_LOG_INFO("Teleop arm requested");
+        if (!motion_control_can_arm()) {
+          APP_LOG_ERROR("Arm rejected (not ready)");
+        } else {
+          motion_control_set_mode(MOTION_MODE_BALANCING);
+#ifdef ENABLE_MOTORS
+          motor_link_enable(true);
+#endif
+        }
+      }
+      if (mode_cycle_rise) {
+        APP_LOG_INFO("Teleop mode cycle requested (not implemented)");
+      }
+      motion_control_set_teleop(cmd->vx_mps, cmd->wz_radps);
+    }
     APP_LOG_INFO("Teleop fwd=%.2f turn=%.2f flags=0x%04x", (double)cmd->vx_mps,
                  (double)cmd->wz_radps, cmd->flags);
   } else if (msg_type == ROBOT_MSG_CMD_HEARTBEAT) {
@@ -1565,11 +1600,15 @@ static void app_send_telem(void) {
   motion_mode_t mode = motion_control_get_mode();
   telem.motion_mode = (uint8_t)mode;
   telem.status = 0U;
+  telem.faults = 0U;
   if (mode == MOTION_MODE_BALANCING) {
-    telem.status |= 0x01U; /* armed */
+    telem.status |= ROBOT_STATUS_ARMED;
   }
   if (mode == MOTION_MODE_FAULT) {
-    telem.status |= 0x04U; /* fault */
+    telem.status |= ROBOT_STATUS_FAULT;
+  }
+  if (s_estop_active) {
+    telem.status |= ROBOT_STATUS_ESTOP;
   }
 
   /* EKF state estimate */
@@ -1581,6 +1620,10 @@ static void app_send_telem(void) {
     telem.x_dot_mps = est.x_dot_mps;
     telem.gyro_bias = est.gyro_bias;
     telem.estimate_valid = est.valid;
+    if (est.valid && g_robot_params.balance.thetaKill > 0.0f &&
+        fabsf(est.theta_rad) > g_robot_params.balance.thetaKill) {
+      telem.faults |= ROBOT_FAULT_KILL_ANGLE;
+    }
   }
 
   /* IMU health metrics */
@@ -1592,6 +1635,18 @@ static void app_send_telem(void) {
     telem.imu_vib_rms_g = imu_health.vib_rms_g;
   }
 
+  uint32_t now_ms = telem.timestamp_ms;
+  uint32_t last_imu_ok_ms = motion_control_get_last_imu_ok_ms();
+  if (last_imu_ok_ms != 0U &&
+      (now_ms - last_imu_ok_ms) > IMU_FAULT_FATAL_MS) {
+    telem.faults |= ROBOT_FAULT_IMU_TIMEOUT;
+  }
+  uint32_t last_motor_ok_ms = motion_control_get_last_motor_ok_ms();
+  if (last_motor_ok_ms != 0U &&
+      (now_ms - last_motor_ok_ms) > MOTOR_LINK_FAULT_FATAL_MS) {
+    telem.faults |= ROBOT_FAULT_MOTOR_TIMEOUT;
+  }
+
   /* Wheel velocities */
 #ifdef ENABLE_MOTORS
   float left_w = 0.0f;
@@ -1599,7 +1654,7 @@ static void app_send_telem(void) {
   if (motor_link_get_wheel_velocities(&left_w, &right_w)) {
     telem.wheel_left_rps = left_w;
     telem.wheel_right_rps = right_w;
-    telem.status |= 0x08U; /* link_ok */
+    telem.status |= ROBOT_STATUS_LINK_OK;
   }
   telem.motor_left_ack_timeouts = motor_link_get_left_ack_timeouts();
   telem.motor_right_ack_timeouts = motor_link_get_right_ack_timeouts();
