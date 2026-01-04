@@ -5,6 +5,9 @@
 
 namespace {
 constexpr float MAX_DT = EKF_MAX_DT;  // guard against large time steps
+constexpr int POST_RESET_DAMPING_STEPS = 10;  // Steps to apply extra damping after reset
+constexpr float DAMPING_R_MULTIPLIER = 5.0f;  // Inflate measurement variance during damping
+constexpr float INNOV_GATE_R_MULTIPLIER = 100.0f;  // Inflate R when gating instead of resetting
 }  // namespace
 
 BalancerEKF::BalancerEKF()
@@ -15,7 +18,8 @@ BalancerEKF::BalancerEKF()
       lastDt_(0.0f),
       diag_{},
       diag_valid_(false),
-      theta_r_base_(0.0f)
+      theta_r_base_(0.0f),
+      damping_steps_remaining_(0)
 {
 }
 
@@ -29,6 +33,30 @@ void BalancerEKF::reset(float theta_init, float pos_init)
 {
     initState();
     setInitialState(theta_init, pos_init);
+    damping_steps_remaining_ = POST_RESET_DAMPING_STEPS;
+}
+
+void BalancerEKF::partialReset(float theta_init, float pos_init)
+{
+    // Preserve velocity (x[3]) and gyro bias (x[4]) estimates
+    float saved_vel = ekf_.x[3];
+    float saved_bias = ekf_.x[4];
+
+    // Reset theta and position only
+    ekf_.x[0] = theta_init;
+    ekf_.x[1] = 0.0f;  // Reset theta_dot to zero
+    ekf_.x[2] = pos_init;
+    ekf_.x[3] = saved_vel;
+    ekf_.x[4] = saved_bias;
+
+    // Increase covariance for reset states only
+    ekf_.P[0 * EKF_N + 0] = EKF_P0_THETA;
+    ekf_.P[1 * EKF_N + 1] = EKF_P0_THETA_DOT;
+    ekf_.P[2 * EKF_N + 2] = EKF_P0_X;
+    // Keep P[3][3] and P[4][4] unchanged (velocity and bias covariance)
+
+    // Start post-reset damping period
+    damping_steps_remaining_ = POST_RESET_DAMPING_STEPS;
 }
 
 void BalancerEKF::initState()
@@ -153,22 +181,38 @@ bool BalancerEKF::step(float thetaAcc, float vEnc, float posEnc, float gyroPitch
         }
     }
 
-    // Innovation gating
+    // Innovation gating - check each measurement channel
     float innov_theta = z[0] - hx[0];
     float innov_vel = z[1] - hx[1];
     float innov_pos = z[2] - hx[2];
-    bool bad_innov =
-        fabsf(innov_theta) > EKF_INNOV_THETA_MAX_RAD ||
-        fabsf(innov_vel) > EKF_INNOV_VEL_MAX_MPS ||
-        fabsf(innov_pos) > EKF_INNOV_POS_MAX_M;
-    if (bad_innov) {
+
+    bool bad_theta = fabsf(innov_theta) > EKF_INNOV_THETA_MAX_RAD;
+    bool bad_vel = fabsf(innov_vel) > EKF_INNOV_VEL_MAX_MPS;
+    bool bad_pos = fabsf(innov_pos) > EKF_INNOV_POS_MAX_M;
+
+    // For severe position/velocity errors, do a partial reset (preserves bias/velocity estimates)
+    // For theta errors, use gating (inflate R) instead of hard reset
+    if (bad_pos || bad_vel) {
         float pos_reset = pos_valid ? posEnc : pos;
-        reset(thetaAcc, pos_reset);
+        partialReset(thetaAcc, pos_reset);
         diag_valid_ = false;
         return false;
     }
 
     float measurement_var = isnan(thetaMeasVar) ? R_[0] : thetaMeasVar;
+
+    // Apply innovation gating for theta: inflate R instead of resetting
+    // This allows smoother recovery from transient disturbances
+    if (bad_theta) {
+        measurement_var *= INNOV_GATE_R_MULTIPLIER;
+    }
+
+    // Apply post-reset damping: inflate measurement variance to reduce correction magnitude
+    if (damping_steps_remaining_ > 0) {
+        measurement_var *= DAMPING_R_MULTIPLIER;
+        damping_steps_remaining_--;
+    }
+
     float R_step[EKF_M * EKF_M];
     memcpy(R_step, R_, sizeof(R_step));
     R_step[0] = measurement_var;

@@ -1011,18 +1011,32 @@ bool motor_link_init(void)
     HAL_Delay(400);
 
     const uint8_t telem_regs[] = {MOTOR_LINK_REG_VELOCITY, MOTOR_LINK_REG_STATUS};
-        while (!motor_link_port_set_telemetry_registers(&s_left_port, telem_regs,
+    int telem_retries = 5;
+    while (!motor_link_port_set_telemetry_registers(&s_left_port, telem_regs,
                                                     sizeof(telem_regs), 0U,
-                                                    MOTOR_LINK_ACK_TIMEOUT_MS))
+                                                    MOTOR_LINK_ACK_TIMEOUT_MS) &&
+           telem_retries-- > 0)
     {
-        APP_LOG_ERROR("Motor link: left telemetry setup failed, retrying");
+        APP_LOG_ERROR("Motor link: left telemetry setup failed, retrying (%d left)", telem_retries);
+        HAL_Delay(100);
+    }
+    if (telem_retries < 0)
+    {
+        APP_LOG_ERROR("Motor link: left telemetry setup failed after retries");
     }
 
-        while (!motor_link_port_set_telemetry_registers(&s_right_port, telem_regs,
+    telem_retries = 5;
+    while (!motor_link_port_set_telemetry_registers(&s_right_port, telem_regs,
                                                     sizeof(telem_regs), 0U,
-                                                    MOTOR_LINK_ACK_TIMEOUT_MS))
+                                                    MOTOR_LINK_ACK_TIMEOUT_MS) &&
+           telem_retries-- > 0)
     {
-        APP_LOG_ERROR("Motor link: right telemetry setup failed, retrying");
+        APP_LOG_ERROR("Motor link: right telemetry setup failed, retrying (%d left)", telem_retries);
+        HAL_Delay(100);
+    }
+    if (telem_retries < 0)
+    {
+        APP_LOG_ERROR("Motor link: right telemetry setup failed after retries");
     }
 
 
@@ -1105,15 +1119,30 @@ bool motor_link_init(void)
         HAL_Delay(10);
     }
 
+    int rate_retries = 5;
     while (!motor_link_port_set_telemetry_rate(&s_left_port, MOTOR_LINK_TELEM_RATE_HZ,
-                                               MOTOR_LINK_ACK_TIMEOUT_MS))
+                                               MOTOR_LINK_ACK_TIMEOUT_MS) &&
+           rate_retries-- > 0)
     {
-        APP_LOG_ERROR("Motor link: left telemetry rate not confirmed, retrying");
+        APP_LOG_ERROR("Motor link: left telemetry rate not confirmed, retrying (%d left)", rate_retries);
+        HAL_Delay(100);
     }
-    while (!motor_link_port_set_telemetry_rate(&s_right_port, MOTOR_LINK_TELEM_RATE_HZ,
-                                               MOTOR_LINK_ACK_TIMEOUT_MS))
+    if (rate_retries < 0)
     {
-        APP_LOG_ERROR("Motor link: right telemetry rate not confirmed, retrying");
+        APP_LOG_ERROR("Motor link: left telemetry rate failed after retries");
+    }
+
+    rate_retries = 5;
+    while (!motor_link_port_set_telemetry_rate(&s_right_port, MOTOR_LINK_TELEM_RATE_HZ,
+                                               MOTOR_LINK_ACK_TIMEOUT_MS) &&
+           rate_retries-- > 0)
+    {
+        APP_LOG_ERROR("Motor link: right telemetry rate not confirmed, retrying (%d left)", rate_retries);
+        HAL_Delay(100);
+    }
+    if (rate_retries < 0)
+    {
+        APP_LOG_ERROR("Motor link: right telemetry rate failed after retries");
     }
 
     s_initialized = 1U;

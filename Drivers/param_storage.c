@@ -1,6 +1,7 @@
 #include "param_storage.h"
 #include "config_control.h"
 #include "crc32.h"
+#include "motion_modes.h"
 #include "stm32h7xx_hal.h"
 
 #include <string.h>
@@ -343,11 +344,25 @@ int param_storage_load(robot_params_t *params)
     return PARAM_ERR_NOT_FOUND;
 }
 
+bool param_storage_can_save(void)
+{
+    motion_mode_t mode = motion_modes_get();
+    return (mode != MOTION_MODE_BALANCING);
+}
+
 int param_storage_save(const robot_params_t *params)
 {
     if (params == NULL)
     {
         return PARAM_ERR;
+    }
+
+    /* Safety check: do not allow saves while balancing.
+     * Flash operations disable interrupts for 100-2000ms which
+     * would cause the robot to fall. */
+    if (!param_storage_can_save())
+    {
+        return PARAM_ERR_BUSY;
     }
 
     if (!s_param.initialized)

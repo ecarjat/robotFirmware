@@ -229,7 +229,12 @@ void imu_sched_run(void)
         return;
     }
 
+    /* Read pending mask atomically to avoid race with EXTI ISRs
+     * that call imu_sched_set_pending(). */
+    __disable_irq();
     uint32_t pending = s_pending_mask & s_enabled_mask;
+    __enable_irq();
+
     if (pending == 0U)
     {
         s_running = 0U;

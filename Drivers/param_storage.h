@@ -19,6 +19,7 @@ extern "C" {
 #define PARAM_ERR_SIZE    -4
 #define PARAM_ERR_FULL    -5
 #define PARAM_ERR_NOT_FOUND -6
+#define PARAM_ERR_BUSY    -7
 
 /**
  * @brief Parameter storage configuration
@@ -179,8 +180,18 @@ int param_storage_load(robot_params_t *params);
  *
  * @param params Pointer to parameters to save
  * @return PARAM_OK on success, error code otherwise
+ *
+ * @note Returns PARAM_ERR_BUSY if robot is in BALANCING mode.
+ *       Flash operations disable interrupts and could cause falls.
  */
 int param_storage_save(const robot_params_t *params);
+
+/**
+ * @brief Check if parameter save is allowed
+ *
+ * @return true if save is allowed (robot not balancing), false otherwise
+ */
+bool param_storage_can_save(void);
 
 /**
  * @brief Get default parameters

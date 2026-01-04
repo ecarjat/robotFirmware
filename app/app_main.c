@@ -128,6 +128,10 @@ static const char *app_link_send_err_str(app_link_send_err_t err) {
   }
 }
 
+static const char *app_imu_name(uint8_t active) {
+  return (active == 1U) ? "ICM42688" : "BMI270";
+}
+
 typedef struct {
   uint8_t valid_mask;
   float accel[APP_IMU_CALIB_FACE_COUNT][3];
@@ -164,6 +168,8 @@ static uint32_t s_last_cmd_ms = 0U;
 static uint32_t s_last_log_ms = 0U;
 static uint32_t s_last_led_ms = 0U;
 static uint32_t s_last_control_ms = 0U;
+static uint8_t s_last_imu_active = 0xFFU;
+static uint8_t s_last_imu_active_valid = 0U;
 static uint32_t s_imu_seq = 0U;
 static uint32_t s_bmi_seq = 0U;
 static uint32_t s_bmm_seq = 0U;
@@ -352,17 +358,29 @@ static void app_idle_tick(void) {
           (double)imu_health.acc_angle_diff_deg,
           (double)imu_health.vib_rms_g,
           (unsigned int)imu_health.gate_accel);
+      if (!s_last_imu_active_valid ||
+          imu_health.active_sensor != s_last_imu_active) {
+        APP_LOG_INFO("IMU active changed: %s -> %s",
+                     s_last_imu_active_valid ? app_imu_name(s_last_imu_active)
+                                             : "unknown",
+                     app_imu_name(imu_health.active_sensor));
+        s_last_imu_active = imu_health.active_sensor;
+        s_last_imu_active_valid = 1U;
+      }
     }
     motion_control_ekf_log_t ekf_log;
     if (motion_control_get_ekf_log(&ekf_log) && ekf_log.valid) {
       APP_LOG_INFO(
           "EKF log accel=[%.3f %.3f %.3f] gyro=[%.3f %.3f %.3f] norm=%.3f "
-          "theta_acc=%.3f rate=%.3f gate=%u",
+          "theta=%.3f theta_acc=%.3f rate=%.3f gate=%u imu_dt=[%lu %lu]ms",
           (double)ekf_log.accel_x, (double)ekf_log.accel_y,
           (double)ekf_log.accel_z, (double)ekf_log.gyro_x,
           (double)ekf_log.gyro_y, (double)ekf_log.gyro_z,
-          (double)ekf_log.accel_norm_g, (double)ekf_log.theta_acc,
-          (double)ekf_log.gyro_rate, (unsigned int)ekf_log.gate);
+          (double)ekf_log.accel_norm_g, (double)ekf_log.theta,
+          (double)ekf_log.theta_acc, (double)ekf_log.gyro_rate,
+          (unsigned int)ekf_log.gate,
+          (unsigned long)ekf_log.imu_primary_dt_ms,
+          (unsigned long)ekf_log.imu_secondary_dt_ms);
     }
 
 #ifdef ENABLE_MOTORS
@@ -1245,6 +1263,48 @@ static void app_rpc_handle(const robot_frame_t *frame) {
                               resp_seq);
       return;
     }
+    case ROBOT_RPC_METHOD_BALANCE_ENABLE: {
+      if (req_data_len != 0U) {
+        app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_LEN, offset,
+                                length, NULL, 0U, resp_seq);
+        return;
+      }
+      if (!motion_control_can_arm()) {
+        app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_NOT_READY, 0U, 0U,
+                                NULL, 0U, resp_seq);
+        return;
+      }
+      s_motor_manual.enabled = 0U;
+      s_motor_manual.left = 0.0f;
+      s_motor_manual.right = 0.0f;
+      motion_control_set_output_enabled(true);
+      motion_control_set_mode(MOTION_MODE_BALANCING);
+#ifdef ENABLE_MOTORS
+      motor_link_enable(true);
+#endif
+      app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_OK, 0U, 0U, NULL, 0U,
+                              resp_seq);
+      return;
+    }
+    case ROBOT_RPC_METHOD_BALANCE_DISABLE: {
+      if (req_data_len != 0U) {
+        app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_LEN, offset,
+                                length, NULL, 0U, resp_seq);
+        return;
+      }
+      s_motor_manual.enabled = 0U;
+      s_motor_manual.left = 0.0f;
+      s_motor_manual.right = 0.0f;
+      motion_control_set_output_enabled(true);
+      motion_control_set_mode(MOTION_MODE_DISARMED);
+#ifdef ENABLE_MOTORS
+      motor_link_set_wheel_Iq(0.0f, 0.0f, 0.0f);
+      motor_link_enable(false);
+#endif
+      app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_OK, 0U, 0U, NULL, 0U,
+                              resp_seq);
+      return;
+    }
     case ROBOT_RPC_METHOD_SET_PARAM: {
       if (length == 0U) {
         if (req_data_len != 0U ||
@@ -1462,10 +1522,6 @@ static bool app_link_send(uint8_t type, uint16_t flags, const uint8_t *payload,
   }
   if (app_in_isr()) {
     s_link_send_last_err = APP_LINK_SEND_ERR_ISR;
-    return false;
-  }
-  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
-    s_link_send_last_err = APP_LINK_SEND_ERR_CTS_BLOCKED;
     return false;
   }
 

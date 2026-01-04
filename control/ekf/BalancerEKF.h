@@ -34,6 +34,10 @@ public:
     void begin();
     void reset(float theta_init, float pos_init);
 
+    // Partial reset: only resets theta and position, preserves velocity and bias.
+    // Use this instead of full reset when innovation gating triggers.
+    void partialReset(float theta_init, float pos_init);
+
     // Run one EKF step using latest measurements; returns true on update success.
     // thetaMeasVar: optional override for theta measurement variance (use NAN for default)
     bool step(float thetaAcc, float vEnc, float posEnc, float gyroPitch, float dt,
@@ -44,6 +48,9 @@ public:
     float getThetaMeasurementVarianceBase() const;
     void setInitialTheta(float theta_rad);
     void setInitialState(float theta_rad, float pos_m);
+
+    // Check if we're in a post-reset damping period
+    bool isInDampingPeriod() const { return damping_steps_remaining_ > 0; }
 
 private:
     void initState();
@@ -57,6 +64,7 @@ private:
     BalancerEkfDiag diag_;
     bool diag_valid_;
     float theta_r_base_;
+    int damping_steps_remaining_;  // Post-reset damping countdown
 };
 
 #endif /* CONTROL_BALANCER_EKF_H */
