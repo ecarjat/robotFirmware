@@ -39,7 +39,7 @@ extern "C" {
  */
 
 #define PARAM_MAGIC             0x524F424FUL  /* 'ROBO' */
-#define PARAM_VERSION           1U
+#define PARAM_VERSION           3U
 #define PARAM_FLASH_BASE        0x080C0000UL
 #define PARAM_FLASH_SIZE        0x00020000UL  /* 128 KB */
 #define PARAM_FLASH_END         (PARAM_FLASH_BASE + PARAM_FLASH_SIZE)
@@ -86,6 +86,24 @@ typedef struct {
 } pid_gains_t;
 
 /**
+ * @brief Balance controller gains (outer loop)
+ */
+typedef struct balance_gains {
+    float Kp_theta;         /* Pitch proportional gain */
+    float Kd_theta;         /* Pitch derivative gain */
+    float Kp_v_to_theta;    /* Velocity error -> tilt reference P gain */
+    float Ki_v_to_theta;    /* Velocity error -> tilt reference I gain */
+    float max_tilt_ref;     /* Max tilt reference (rad) */
+    float Kv_damp;          /* Velocity damping gain */
+    float K_turn;           /* Turn command gain */
+    float K_yawDamp;        /* Yaw rate damping gain */
+    float alpha_yaw;        /* Yaw rate blend factor */
+    float IqMax;            /* Max motor current (A) */
+    float thetaKill;        /* Kill-switch angle (rad) */
+    float iV_max;           /* Velocity integrator limit (rad) */
+} balance_gains_t;
+
+/**
  * @brief Robot parameters structure
  *
  * This structure contains all persistent robot configuration.
@@ -112,18 +130,24 @@ typedef struct {
     pid_gains_t motion_linear;  /* Linear velocity controller */
     pid_gains_t motion_angular; /* Angular velocity controller */
 
+    /* Balance controller gains */
+    balance_gains_t balance;
+
     /* Motion limits */
     float max_linear_vel_mps;
     float max_angular_vel_rps;
     float max_linear_accel_mps2;
     float max_angular_accel_rps2;
 
+    /* Control loop */
+    float control_rate_hz;
+
     /* Communication */
-    uint32_t uart_baudrate;
+    uint32_t uart_baudrate; /* not used */
     uint8_t  robot_id;
 
     /* Reserved for future use */
-    uint8_t  reserved[32];
+    uint8_t  reserved[16];
 } robot_params_t;
 
 /**

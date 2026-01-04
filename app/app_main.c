@@ -1,3 +1,5 @@
+#include <limits.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -11,9 +13,11 @@
 #include "imu_bus.h"
 #include "imu_sched.h"
 #include "motor_link.h"
+#include "motion_control.h"
 #include "mux_channels.h"
 #include "param_storage.h"
 #include "sensors.h"
+#include "config_control.h"
 #if SENSOR_ENABLE_BMI270
 #include "imu_bmi270.h"
 #endif
@@ -31,9 +35,16 @@
 #define APP_LINK_RX_BUFFER_BYTES 512U
 #define APP_LINK_FRAME_BUFFER_BYTES ROBOT_FRAME_MAX_ENCODED
 #define APP_LINK_TX_BUFFER_BYTES 320U
-#define APP_TELEM_PERIOD_MS 20U
-#define APP_HEARTBEAT_TIMEOUT_MS 250U
+#define APP_TELEM_PERIOD_MS 500U
+#define APP_HEARTBEAT_TIMEOUT_MS 200U
 #define APP_LOG_PERIOD_MS 500U
+#define APP_IMU_CALIB_FACE_COUNT 6U
+#define APP_IMU_CALIB_IMU_COUNT 2U
+#define APP_IMU_CALIB_DEFAULT_SAMPLES 800U
+#define APP_IMU_CALIB_MAX_SAMPLES 800U
+#define APP_IMU_CALIB_TIMEOUT_MS 3000U
+#define APP_IMU_ACCEL_RANGE_G 4.0f
+#define APP_IMU_GYRO_RANGE_DPS 500.0f
 #ifndef APP_LINK_DEBUG_FRAMES
 #define APP_LINK_DEBUG_FRAMES 1U
 #endif
@@ -43,7 +54,7 @@
 #ifndef APP_LINK_DEBUG_MAX_BYTES
 #define APP_LINK_DEBUG_MAX_BYTES 48U
 #define ROBOT_USE_HW_CRC 1
-// #define ENABLE_MOTORS
+#define ENABLE_MOTORS
 #endif
 
 static void app_init(void);
@@ -56,6 +67,7 @@ static void app_link_debug_frame(const uint8_t *frame, size_t len);
 static void app_link_log_bytes(const char *label, const uint8_t *data,
                                size_t len);
 static void app_link_dispatch(const robot_frame_t *frame);
+static void app_rpc_handle(const robot_frame_t *frame);
 static void app_cmd_handler(uint8_t msg_type, const uint8_t *payload,
                             size_t len, void *ctx);
 static void app_link_poll(void);
@@ -68,6 +80,69 @@ static void app_link_invalidate_rx_cache(size_t len);
 static bool app_link_dma_is_circular(void);
 static void app_log_sensors(void);
 static void app_log_link_errors(void);
+static void app_motor_manual_apply(void);
+static uint8_t app_motor_manual_enable(bool enable);
+static uint8_t app_motor_manual_run(uint8_t side, float intensity);
+static bool app_rpc_send_param_resp(uint8_t method,
+                                    uint8_t status,
+                                    uint16_t offset,
+                                    uint16_t length,
+                                    const uint8_t *data,
+                                    uint16_t data_len,
+                                    uint16_t seq_override);
+
+typedef enum {
+  APP_LINK_SEND_OK = 0,
+  APP_LINK_SEND_ERR_UART_NULL,
+  APP_LINK_SEND_ERR_ISR,
+  APP_LINK_SEND_ERR_FRAME_INIT,
+  APP_LINK_SEND_ERR_ENCODE,
+  APP_LINK_SEND_ERR_CTS_BLOCKED,
+  APP_LINK_SEND_ERR_UART_BUSY,
+  APP_LINK_SEND_ERR_UART_TIMEOUT,
+  APP_LINK_SEND_ERR_UART_ERROR,
+} app_link_send_err_t;
+
+static const char *app_link_send_err_str(app_link_send_err_t err) {
+  switch (err) {
+    case APP_LINK_SEND_OK:
+      return "ok";
+    case APP_LINK_SEND_ERR_UART_NULL:
+      return "uart_null";
+    case APP_LINK_SEND_ERR_ISR:
+      return "in_isr";
+    case APP_LINK_SEND_ERR_FRAME_INIT:
+      return "frame_init";
+    case APP_LINK_SEND_ERR_ENCODE:
+      return "encode";
+    case APP_LINK_SEND_ERR_CTS_BLOCKED:
+      return "cts_blocked";
+    case APP_LINK_SEND_ERR_UART_BUSY:
+      return "uart_busy";
+    case APP_LINK_SEND_ERR_UART_TIMEOUT:
+      return "uart_timeout";
+    case APP_LINK_SEND_ERR_UART_ERROR:
+      return "uart_error";
+    default:
+      return "unknown";
+  }
+}
+
+typedef struct {
+  uint8_t valid_mask;
+  float accel[APP_IMU_CALIB_FACE_COUNT][3];
+  float gyro[APP_IMU_CALIB_FACE_COUNT][3];
+} app_imu_calib_state_t;
+
+static app_imu_calib_state_t s_imu_calib[APP_IMU_CALIB_IMU_COUNT];
+
+typedef struct {
+  uint8_t enabled;
+  float left;
+  float right;
+} app_motor_manual_t;
+
+static app_motor_manual_t s_motor_manual = {0U, 0.0f, 0.0f};
 
 void app_main(void) {
   app_init();
@@ -88,6 +163,7 @@ static uint32_t s_last_telem_ms = 0U;
 static uint32_t s_last_cmd_ms = 0U;
 static uint32_t s_last_log_ms = 0U;
 static uint32_t s_last_led_ms = 0U;
+static uint32_t s_last_control_ms = 0U;
 static uint32_t s_imu_seq = 0U;
 static uint32_t s_bmi_seq = 0U;
 static uint32_t s_bmm_seq = 0U;
@@ -98,6 +174,10 @@ static volatile uint32_t s_link_uart_errors = 0U;
 static volatile uint32_t s_link_uart_last_err = 0U;
 static volatile uint16_t s_uart_rx_pending_size = 0U;
 static volatile uint8_t s_uart_rx_event_pending = 0U;
+static volatile app_link_send_err_t s_link_send_last_err = APP_LINK_SEND_OK;
+static volatile uint32_t s_link_send_last_status = 0U;
+static volatile uint32_t s_link_send_last_hal_state = 0U;
+static volatile uint32_t s_link_send_last_hal_err = 0U;
 
 /* Global robot parameters (loaded from flash at startup) */
 robot_params_t g_robot_params;
@@ -119,6 +199,8 @@ static void app_init(void) {
   } else {
     APP_LOG_ERROR("Param load error: %d", param_rc);
   }
+
+  motion_control_init();
   APP_LOG_INFO("Booting robot firmware (frame v%u)", ROBOT_FRAME_VERSION);
   APP_LOG_INFO("CMD channel id: %u", ROBOT_CHANNEL_CMD);
 
@@ -210,6 +292,8 @@ static void app_init(void) {
   if (!motor_link_init()) {
     APP_LOG_ERROR("Motor link init failed");
   }
+  motor_link_set_motor_directions(g_robot_params.motor_direction[0],
+                                  g_robot_params.motor_direction[1]);
 #endif
   robot_mux_init(&s_mux);
   robot_mux_register(&s_mux, ROBOT_CHANNEL_CMD, app_cmd_handler, NULL);
@@ -231,10 +315,23 @@ static void app_idle_tick(void) {
 #ifdef ENABLE_MOTORS
   motor_link_poll();
 #endif
+  float control_hz = g_robot_params.control_rate_hz;
+  if (control_hz <= 1.0f) {
+    control_hz = CONTROL_DEFAULT_HZ;
+  }
+  uint32_t control_period_ms = (uint32_t)(1000.0f / control_hz);
+  if (control_period_ms == 0U) {
+    control_period_ms = 1U;
+  }
+  if ((now - s_last_control_ms) >= control_period_ms) {
+    s_last_control_ms = now;
+    motion_control_tick(now);
+    app_motor_manual_apply();
+  }
   imu_sched_tick();
-#if SENSOR_ENABLE_BMM150
-  imu_bmm150_poll();
-#endif
+// #if SENSOR_ENABLE_BMM150
+//   imu_bmm150_poll();
+// #endif
 
   // if ((now - s_last_cmd_ms) > APP_HEARTBEAT_TIMEOUT_MS) {
   //   APP_LOG_ERROR("Link heartbeat timeout");
@@ -244,8 +341,39 @@ static void app_idle_tick(void) {
     s_last_log_ms = now;
     app_log_sensors();
     app_log_link_errors();
+    motion_control_imu_health_t imu_health;
+    if (motion_control_get_imu_health(&imu_health)) {
+      APP_LOG_INFO(
+          "IMU health active=%u gyro_diff=%.2f dps pitch_diff=%.2f dps "
+          "acc_angle=%.2f deg vib=%.3f g gate=%u",
+          (unsigned int)imu_health.active_sensor,
+          (double)imu_health.gyro_diff_dps,
+          (double)imu_health.gyro_pitch_diff_dps,
+          (double)imu_health.acc_angle_diff_deg,
+          (double)imu_health.vib_rms_g,
+          (unsigned int)imu_health.gate_accel);
+    }
+    motion_control_ekf_log_t ekf_log;
+    if (motion_control_get_ekf_log(&ekf_log) && ekf_log.valid) {
+      APP_LOG_INFO(
+          "EKF log accel=[%.3f %.3f %.3f] gyro=[%.3f %.3f %.3f] norm=%.3f "
+          "theta_acc=%.3f rate=%.3f gate=%u",
+          (double)ekf_log.accel_x, (double)ekf_log.accel_y,
+          (double)ekf_log.accel_z, (double)ekf_log.gyro_x,
+          (double)ekf_log.gyro_y, (double)ekf_log.gyro_z,
+          (double)ekf_log.accel_norm_g, (double)ekf_log.theta_acc,
+          (double)ekf_log.gyro_rate, (unsigned int)ekf_log.gate);
+    }
 
 #ifdef ENABLE_MOTORS
+    float gyro_z = 0.0f;
+    float yaw_rate_enc = 0.0f;
+    float yaw_rate = 0.0f;
+    if (motion_control_get_yaw_debug(&gyro_z, &yaw_rate_enc, &yaw_rate)) {
+      APP_LOG_INFO("Yaw debug gyroZ=%.4f enc=%.4f blended=%.4f",
+                   (double)gyro_z, (double)yaw_rate_enc, (double)yaw_rate);
+    }
+
     float left_vel = 0.0f;
     float right_vel = 0.0f;
     bool motor_ok = motor_link_get_wheel_velocities(&left_vel, &right_vel);
@@ -274,39 +402,39 @@ static bool app_in_isr(void) {
 
 #if SENSOR_ENABLE_BMI270
 static void app_log_bmi270(void) {
-  imu_bmi270_sample_t sample;
-  if (imu_bmi270_try_get_latest(&sample, &s_bmi_seq)) {
-    APP_LOG_INFO("BMI270 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
-                 "%ld temp=%ld",
-                 (long)sample.accel[0], (long)sample.accel[1],
-                 (long)sample.accel[2], (long)sample.gyro[0],
-                 (long)sample.gyro[1], (long)sample.gyro[2],
-                 (long)sample.temperature);
-  }
+  // imu_bmi270_sample_t sample;
+  // if (imu_bmi270_try_get_latest(&sample, &s_bmi_seq)) {
+  //   APP_LOG_INFO("BMI270 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
+  //                "%ld temp=%ld",
+  //                (long)sample.accel[0], (long)sample.accel[1],
+  //                (long)sample.accel[2], (long)sample.gyro[0],
+  //                (long)sample.gyro[1], (long)sample.gyro[2],
+  //                (long)sample.temperature);
+  // }
 }
 #endif
 
 #if SENSOR_ENABLE_ICM42688
 static void app_log_icm42688(void) {
-  imu_icm42688_sample_t sample;
-  if (imu_icm42688_try_get_latest(&sample, &s_imu_seq)) {
-    APP_LOG_INFO("ICM42688 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
-                 "%ld temp=%ld",
-                 (long)sample.accel[0], (long)sample.accel[1],
-                 (long)sample.accel[2], (long)sample.gyro[0],
-                 (long)sample.gyro[1], (long)sample.gyro[2],
-                 (long)sample.temperature);
-  }
+  // imu_icm42688_sample_t sample;
+  // if (imu_icm42688_try_get_latest(&sample, &s_imu_seq)) {
+  //   APP_LOG_INFO("ICM42688 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
+  //                "%ld temp=%ld",
+  //                (long)sample.accel[0], (long)sample.accel[1],
+  //                (long)sample.accel[2], (long)sample.gyro[0],
+  //                (long)sample.gyro[1], (long)sample.gyro[2],
+  //                (long)sample.temperature);
+  // }
 }
 #endif
 
 #if SENSOR_ENABLE_BMM150
 static void app_log_bmm150(void) {
-  imu_bmm150_sample_t sample;
-  if (imu_bmm150_try_get_latest(&sample, &s_bmm_seq)) {
-    APP_LOG_INFO("BMM150 mag [uT] = %ld, %ld, %ld", (long)sample.mag[0],
-                 (long)sample.mag[1], (long)sample.mag[2]);
-  }
+  // imu_bmm150_sample_t sample;
+  // if (imu_bmm150_try_get_latest(&sample, &s_bmm_seq)) {
+  //   APP_LOG_INFO("BMM150 mag [uT] = %ld, %ld, %ld", (long)sample.mag[0],
+  //                (long)sample.mag[1], (long)sample.mag[2]);
+  // }
 }
 #endif
 
@@ -595,7 +723,578 @@ static void app_link_dispatch(const robot_frame_t *frame) {
     s_last_cmd_ms = HAL_GetTick();
   }
 
+  if (frame->hdr.type == ROBOT_MSG_RPC_REQ) {
+    app_rpc_handle(frame);
+    return;
+  }
+
   robot_mux_dispatch(&s_mux, frame->hdr.type, frame->payload, frame->hdr.len);
+}
+
+static bool app_rpc_send_param_resp(uint8_t method,
+                                    uint8_t status,
+                                    uint16_t offset,
+                                    uint16_t length,
+                                    const uint8_t *data,
+                                    uint16_t data_len,
+                                    uint16_t seq_override) {
+  robot_rpc_param_t resp_hdr;
+  uint8_t payload[ROBOT_FRAME_MAX_PAYLOAD];
+  size_t total_len = sizeof(resp_hdr) + (size_t)data_len;
+
+  if (total_len > sizeof(payload)) {
+    return false;
+  }
+
+  resp_hdr.method = method;
+  resp_hdr.flags = status;
+  resp_hdr.offset = offset;
+  resp_hdr.length = length;
+  memcpy(payload, &resp_hdr, sizeof(resp_hdr));
+  if (data_len > 0U && data != NULL) {
+    memcpy(payload + sizeof(resp_hdr), data, data_len);
+  }
+
+  return app_link_send(ROBOT_MSG_RPC_RESP, ROBOT_FLAG_ACK_REQ, payload,
+                       (uint16_t)total_len, seq_override);
+}
+
+static float app_vec_norm(const float v[3]) {
+  return sqrtf((v[0] * v[0]) + (v[1] * v[1]) + (v[2] * v[2]));
+}
+
+static float app_vec_dot(const float a[3], const float b[3]) {
+  return (a[0] * b[0]) + (a[1] * b[1]) + (a[2] * b[2]);
+}
+
+static void app_vec_cross(const float a[3], const float b[3], float out[3]) {
+  out[0] = (a[1] * b[2]) - (a[2] * b[1]);
+  out[1] = (a[2] * b[0]) - (a[0] * b[2]);
+  out[2] = (a[0] * b[1]) - (a[1] * b[0]);
+}
+
+static bool app_vec_normalize(float v[3]) {
+  float norm = app_vec_norm(v);
+  if (norm < 1e-6f) {
+    return false;
+  }
+  float inv = 1.0f / norm;
+  v[0] *= inv;
+  v[1] *= inv;
+  v[2] *= inv;
+  return true;
+}
+
+static int16_t app_clamp_i16(int32_t value) {
+  if (value > INT16_MAX) {
+    return INT16_MAX;
+  }
+  if (value < INT16_MIN) {
+    return INT16_MIN;
+  }
+  return (int16_t)value;
+}
+
+static void app_motor_manual_apply(void) {
+#ifdef ENABLE_MOTORS
+  if (!s_motor_manual.enabled) {
+    return;
+  }
+  float max_A = fabsf(g_robot_params.balance.IqMax);
+  if (max_A <= 0.0f) {
+    return;
+  }
+  float left = s_motor_manual.left;
+  float right = s_motor_manual.right;
+  if (left > 1.0f) {
+    left = 1.0f;
+  } else if (left < -1.0f) {
+    left = -1.0f;
+  }
+  if (right > 1.0f) {
+    right = 1.0f;
+  } else if (right < -1.0f) {
+    right = -1.0f;
+  }
+  motor_link_set_wheel_Iq(left * max_A, right * max_A, max_A);
+#else
+  (void)0;
+#endif
+}
+
+static uint8_t app_motor_manual_enable(bool enable) {
+#ifdef ENABLE_MOTORS
+  if (enable) {
+    s_motor_manual.enabled = 1U;
+    s_motor_manual.left = 0.0f;
+    s_motor_manual.right = 0.0f;
+    motion_control_set_mode(MOTION_MODE_DISARMED);
+    motion_control_set_output_enabled(false);
+    motor_link_set_control_mode(MOTOR_CONTROL_TORQUE);
+    motor_link_enable(true);
+  } else {
+    s_motor_manual.enabled = 0U;
+    s_motor_manual.left = 0.0f;
+    s_motor_manual.right = 0.0f;
+    motor_link_set_wheel_Iq(0.0f, 0.0f, 0.0f);
+    motor_link_enable(false);
+    motion_control_set_output_enabled(true);
+  }
+  return ROBOT_RPC_STATUS_OK;
+#else
+  (void)enable;
+  return ROBOT_RPC_STATUS_NOT_READY;
+#endif
+}
+
+static uint8_t app_motor_manual_run(uint8_t side, float intensity) {
+#ifdef ENABLE_MOTORS
+  if (!s_motor_manual.enabled) {
+    return ROBOT_RPC_STATUS_NOT_READY;
+  }
+  if (side == ROBOT_MOTOR_SIDE_LEFT) {
+    s_motor_manual.left = intensity;
+  } else if (side == ROBOT_MOTOR_SIDE_RIGHT) {
+    s_motor_manual.right = intensity;
+  } else {
+    return ROBOT_RPC_STATUS_BAD_PARAM;
+  }
+  app_motor_manual_apply();
+  return ROBOT_RPC_STATUS_OK;
+#else
+  (void)side;
+  (void)intensity;
+  return ROBOT_RPC_STATUS_NOT_READY;
+#endif
+}
+
+static bool app_imu_calib_build_rotation(const app_imu_calib_state_t *state,
+                                         float rot[9]) {
+  if (state == NULL || rot == NULL) {
+    return false;
+  }
+  if (state->valid_mask != ((1U << APP_IMU_CALIB_FACE_COUNT) - 1U)) {
+    return false;
+  }
+
+  float x_vec[3];
+  float y_vec[3];
+  float z_vec[3];
+  for (size_t i = 0U; i < 3U; ++i) {
+    x_vec[i] = state->accel[ROBOT_IMU_FACE_X_POS_UP][i] -
+               state->accel[ROBOT_IMU_FACE_X_NEG_UP][i];
+    y_vec[i] = state->accel[ROBOT_IMU_FACE_Y_POS_UP][i] -
+               state->accel[ROBOT_IMU_FACE_Y_NEG_UP][i];
+    z_vec[i] = state->accel[ROBOT_IMU_FACE_Z_POS_UP][i] -
+               state->accel[ROBOT_IMU_FACE_Z_NEG_UP][i];
+  }
+
+  if (!app_vec_normalize(x_vec) || !app_vec_normalize(y_vec) ||
+      !app_vec_normalize(z_vec)) {
+    return false;
+  }
+
+  float r0[3] = {x_vec[0], x_vec[1], x_vec[2]};
+  float r1[3] = {y_vec[0], y_vec[1], y_vec[2]};
+
+  float proj = app_vec_dot(r1, r0);
+  for (size_t i = 0U; i < 3U; ++i) {
+    r1[i] -= proj * r0[i];
+  }
+  if (!app_vec_normalize(r1)) {
+    return false;
+  }
+
+  float r2[3];
+  app_vec_cross(r0, r1, r2);
+  if (app_vec_dot(r2, z_vec) < 0.0f) {
+    for (size_t i = 0U; i < 3U; ++i) {
+      r1[i] = -r1[i];
+      r2[i] = -r2[i];
+    }
+  }
+
+  rot[0] = r0[0];
+  rot[1] = r0[1];
+  rot[2] = r0[2];
+  rot[3] = r1[0];
+  rot[4] = r1[1];
+  rot[5] = r1[2];
+  rot[6] = r2[0];
+  rot[7] = r2[1];
+  rot[8] = r2[2];
+  return true;
+}
+
+static bool app_imu_calib_capture_bmi270(float accel[3],
+                                         float gyro[3],
+                                         uint16_t samples) {
+#if SENSOR_ENABLE_BMI270
+  uint16_t target = samples;
+  if (target == 0U) {
+    target = APP_IMU_CALIB_DEFAULT_SAMPLES;
+  }
+  if (target > APP_IMU_CALIB_MAX_SAMPLES) {
+    target = APP_IMU_CALIB_MAX_SAMPLES;
+  }
+
+  uint32_t seq = 0U;
+  uint32_t count = 0U;
+  float sum_accel[3] = {0.0f, 0.0f, 0.0f};
+  float sum_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const uint32_t start = HAL_GetTick();
+
+  while (count < target &&
+         (HAL_GetTick() - start) < APP_IMU_CALIB_TIMEOUT_MS) {
+    imu_bmi270_sample_t sample;
+    if (imu_bmi270_try_get_latest(&sample, &seq)) {
+      sum_accel[0] += (float)sample.accel[0];
+      sum_accel[1] += (float)sample.accel[1];
+      sum_accel[2] += (float)sample.accel[2];
+      sum_gyro[0] += (float)sample.gyro[0];
+      sum_gyro[1] += (float)sample.gyro[1];
+      sum_gyro[2] += (float)sample.gyro[2];
+      ++count;
+    }
+    imu_sched_run();
+    HAL_Delay(1U);
+  }
+
+  if (count == 0U) {
+    return false;
+  }
+
+  const float accel_scale =
+      (APP_IMU_ACCEL_RANGE_G * 9.80665f) / 32768.0f;
+  const float gyro_scale = APP_IMU_GYRO_RANGE_DPS / 32768.0f;
+  const float inv = 1.0f / (float)count;
+  accel[0] = sum_accel[0] * inv * accel_scale;
+  accel[1] = sum_accel[1] * inv * accel_scale;
+  accel[2] = sum_accel[2] * inv * accel_scale;
+  gyro[0] = sum_gyro[0] * inv * gyro_scale;
+  gyro[1] = sum_gyro[1] * inv * gyro_scale;
+  gyro[2] = sum_gyro[2] * inv * gyro_scale;
+  return true;
+#else
+  (void)accel;
+  (void)gyro;
+  (void)samples;
+  return false;
+#endif
+}
+
+static bool app_imu_calib_capture_icm42688(float accel[3],
+                                           float gyro[3],
+                                           uint16_t samples) {
+#if SENSOR_ENABLE_ICM42688
+  uint16_t target = samples;
+  if (target == 0U) {
+    target = APP_IMU_CALIB_DEFAULT_SAMPLES;
+  }
+  if (target > APP_IMU_CALIB_MAX_SAMPLES) {
+    target = APP_IMU_CALIB_MAX_SAMPLES;
+  }
+
+  uint32_t seq = 0U;
+  uint32_t count = 0U;
+  float sum_accel[3] = {0.0f, 0.0f, 0.0f};
+  float sum_gyro[3] = {0.0f, 0.0f, 0.0f};
+  const uint32_t start = HAL_GetTick();
+
+  while (count < target &&
+         (HAL_GetTick() - start) < APP_IMU_CALIB_TIMEOUT_MS) {
+    imu_icm42688_sample_t sample;
+    if (imu_icm42688_try_get_latest(&sample, &seq)) {
+      sum_accel[0] += (float)sample.accel[0];
+      sum_accel[1] += (float)sample.accel[1];
+      sum_accel[2] += (float)sample.accel[2];
+      sum_gyro[0] += (float)sample.gyro[0];
+      sum_gyro[1] += (float)sample.gyro[1];
+      sum_gyro[2] += (float)sample.gyro[2];
+      ++count;
+    }
+    imu_sched_run();
+    HAL_Delay(1U);
+  }
+
+  if (count == 0U) {
+    return false;
+  }
+
+  const float accel_scale =
+      (APP_IMU_ACCEL_RANGE_G * 9.80665f) / 32768.0f;
+  const float gyro_scale = APP_IMU_GYRO_RANGE_DPS / 32768.0f;
+  const float inv = 1.0f / (float)count;
+  accel[0] = sum_accel[0] * inv * accel_scale;
+  accel[1] = sum_accel[1] * inv * accel_scale;
+  accel[2] = sum_accel[2] * inv * accel_scale;
+  gyro[0] = sum_gyro[0] * inv * gyro_scale;
+  gyro[1] = sum_gyro[1] * inv * gyro_scale;
+  gyro[2] = sum_gyro[2] * inv * gyro_scale;
+  return true;
+#else
+  (void)accel;
+  (void)gyro;
+  (void)samples;
+  return false;
+#endif
+}
+
+static uint8_t app_imu_calib_apply(uint8_t imu_id,
+                                   const app_imu_calib_state_t *state) {
+  if (state == NULL) {
+    return ROBOT_RPC_STATUS_BAD_PARAM;
+  }
+
+  float accel_bias[3] = {0.0f, 0.0f, 0.0f};
+  float gyro_bias[3] = {0.0f, 0.0f, 0.0f};
+  for (size_t face = 0U; face < APP_IMU_CALIB_FACE_COUNT; ++face) {
+    accel_bias[0] += state->accel[face][0];
+    accel_bias[1] += state->accel[face][1];
+    accel_bias[2] += state->accel[face][2];
+    gyro_bias[0] += state->gyro[face][0];
+    gyro_bias[1] += state->gyro[face][1];
+    gyro_bias[2] += state->gyro[face][2];
+  }
+
+  const float inv_faces = 1.0f / (float)APP_IMU_CALIB_FACE_COUNT;
+  accel_bias[0] *= inv_faces;
+  accel_bias[1] *= inv_faces;
+  accel_bias[2] *= inv_faces;
+  gyro_bias[0] *= inv_faces;
+  gyro_bias[1] *= inv_faces;
+  gyro_bias[2] *= inv_faces;
+
+  const float inv_g = 1.0f / 9.80665f;
+  int32_t accel_bias_mg[3] = {
+      (int32_t)lrintf(accel_bias[0] * inv_g * 1000.0f),
+      (int32_t)lrintf(accel_bias[1] * inv_g * 1000.0f),
+      (int32_t)lrintf(accel_bias[2] * inv_g * 1000.0f),
+  };
+  int32_t gyro_bias_mdps[3] = {
+      (int32_t)lrintf(gyro_bias[0] * 1000.0f),
+      (int32_t)lrintf(gyro_bias[1] * 1000.0f),
+      (int32_t)lrintf(gyro_bias[2] * 1000.0f),
+  };
+
+  float rotation[9];
+  if (!app_imu_calib_build_rotation(state, rotation)) {
+    return ROBOT_RPC_STATUS_BAD_PARAM;
+  }
+
+  imu_calib_t *calib = NULL;
+  if (imu_id == 0U) {
+    calib = &g_robot_params.imu_bmi270;
+  } else if (imu_id == 1U) {
+    calib = &g_robot_params.imu_icm42688;
+  } else {
+    return ROBOT_RPC_STATUS_BAD_PARAM;
+  }
+
+  calib->accel_bias[0] = app_clamp_i16(accel_bias_mg[0]);
+  calib->accel_bias[1] = app_clamp_i16(accel_bias_mg[1]);
+  calib->accel_bias[2] = app_clamp_i16(accel_bias_mg[2]);
+  calib->gyro_bias[0] = app_clamp_i16(gyro_bias_mdps[0]);
+  calib->gyro_bias[1] = app_clamp_i16(gyro_bias_mdps[1]);
+  calib->gyro_bias[2] = app_clamp_i16(gyro_bias_mdps[2]);
+  memcpy(calib->rotation, rotation, sizeof(rotation));
+
+  motion_control_apply_params();
+  return ROBOT_RPC_STATUS_OK;
+}
+
+static uint8_t app_imu_calib_capture_face(uint8_t imu_id,
+                                          uint8_t face,
+                                          uint16_t samples) {
+  if (face >= ROBOT_IMU_FACE_COUNT) {
+    return ROBOT_RPC_STATUS_BAD_PARAM;
+  }
+  if (imu_id >= APP_IMU_CALIB_IMU_COUNT) {
+    return ROBOT_RPC_STATUS_BAD_PARAM;
+  }
+
+  float accel[3];
+  float gyro[3];
+  bool ok = false;
+  if (imu_id == 0U) {
+#if SENSOR_ENABLE_BMI270
+    ok = app_imu_calib_capture_bmi270(accel, gyro, samples);
+#else
+    return ROBOT_RPC_STATUS_NOT_READY;
+#endif
+  } else {
+#if SENSOR_ENABLE_ICM42688
+    ok = app_imu_calib_capture_icm42688(accel, gyro, samples);
+#else
+    return ROBOT_RPC_STATUS_NOT_READY;
+#endif
+  }
+
+  if (!ok) {
+    return ROBOT_RPC_STATUS_TIMEOUT;
+  }
+
+  app_imu_calib_state_t *state = &s_imu_calib[imu_id];
+  for (size_t i = 0U; i < 3U; ++i) {
+    state->accel[face][i] = accel[i];
+    state->gyro[face][i] = gyro[i];
+  }
+  state->valid_mask |= (uint8_t)(1U << face);
+
+  if (state->valid_mask != ((1U << APP_IMU_CALIB_FACE_COUNT) - 1U)) {
+    return ROBOT_RPC_STATUS_INCOMPLETE;
+  }
+
+  return app_imu_calib_apply(imu_id, state);
+}
+
+static void app_rpc_handle(const robot_frame_t *frame) {
+  if (frame == NULL) {
+    return;
+  }
+  if (frame->hdr.len < sizeof(robot_rpc_param_t)) {
+    APP_LOG_ERROR("RPC payload too short (%u)",
+                  (unsigned int)frame->hdr.len);
+    return;
+  }
+
+  robot_rpc_param_t req;
+  memcpy(&req, frame->payload, sizeof(req));
+
+  const size_t params_size = sizeof(robot_params_t);
+  const size_t req_data_len = frame->hdr.len - sizeof(req);
+  const uint8_t *req_data = frame->payload + sizeof(req);
+  const uint16_t offset = req.offset;
+  const uint16_t length = req.length;
+  const uint16_t resp_seq = (frame->hdr.seq != 0U) ? frame->hdr.seq : 0U;
+
+  if ((size_t)offset > params_size) {
+    app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_OFFSET, offset,
+                            length, NULL, 0U, resp_seq);
+    return;
+  }
+  if ((size_t)offset + (size_t)length > params_size) {
+    app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_LEN, offset,
+                            length, NULL, 0U, resp_seq);
+    return;
+  }
+
+  switch (req.method) {
+    case ROBOT_RPC_METHOD_GET_PARAM: {
+      if (req_data_len != 0U || length == 0U) {
+        app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_LEN, offset,
+                                length, NULL, 0U, resp_seq);
+        return;
+      }
+      if ((size_t)length >
+          (ROBOT_FRAME_MAX_PAYLOAD - sizeof(robot_rpc_param_t))) {
+        app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_LEN, offset,
+                                length, NULL, 0U, resp_seq);
+        return;
+      }
+      const uint8_t *src = (const uint8_t *)&g_robot_params + offset;
+      app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_OK, offset, length,
+                              src, length, resp_seq);
+      return;
+    }
+    case ROBOT_RPC_METHOD_IMU_CALIB_FACE: {
+      if (req_data_len != sizeof(robot_rpc_imu_calib_face_t)) {
+        app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_LEN, offset,
+                                length, NULL, 0U, resp_seq);
+        return;
+      }
+      robot_rpc_imu_calib_face_t calib_req;
+      memcpy(&calib_req, req_data, sizeof(calib_req));
+
+      uint8_t status = app_imu_calib_capture_face(calib_req.imu, calib_req.face,
+                                                  calib_req.samples);
+      app_rpc_send_param_resp(req.method, status, calib_req.face, 0U, NULL, 0U,
+                              resp_seq);
+      return;
+    }
+    case ROBOT_RPC_METHOD_MOTOR_ENABLE: {
+      if (req_data_len != 0U) {
+        app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_LEN, offset,
+                                length, NULL, 0U, resp_seq);
+        return;
+      }
+      uint8_t status = app_motor_manual_enable(true);
+      app_rpc_send_param_resp(req.method, status, 0U, 0U, NULL, 0U, resp_seq);
+      return;
+    }
+    case ROBOT_RPC_METHOD_MOTOR_DISABLE: {
+      if (req_data_len != 0U) {
+        app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_LEN, offset,
+                                length, NULL, 0U, resp_seq);
+        return;
+      }
+      uint8_t status = app_motor_manual_enable(false);
+      app_rpc_send_param_resp(req.method, status, 0U, 0U, NULL, 0U, resp_seq);
+      return;
+    }
+    case ROBOT_RPC_METHOD_MOTOR_RUN: {
+      if (req_data_len != sizeof(robot_rpc_motor_run_t)) {
+        app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_LEN, offset,
+                                length, NULL, 0U, resp_seq);
+        return;
+      }
+      robot_rpc_motor_run_t run_req;
+      memcpy(&run_req, req_data, sizeof(run_req));
+      uint8_t status = app_motor_manual_run(run_req.side, run_req.intensity);
+      app_rpc_send_param_resp(req.method, status, run_req.side, 0U, NULL, 0U,
+                              resp_seq);
+      return;
+    }
+    case ROBOT_RPC_METHOD_SET_PARAM: {
+      if (length == 0U) {
+        if (req_data_len != 0U ||
+            (req.flags & ROBOT_RPC_FLAG_SAVE) == 0U) {
+          app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_LEN, offset,
+                                  length, NULL, 0U, resp_seq);
+          return;
+        }
+        uint8_t status = ROBOT_RPC_STATUS_OK;
+        int rc = param_storage_save(&g_robot_params);
+        if (rc != PARAM_OK) {
+          status = ROBOT_RPC_STATUS_STORAGE;
+        }
+        app_rpc_send_param_resp(req.method, status, offset, length, NULL, 0U,
+                                resp_seq);
+        return;
+      }
+      if (req_data_len != length) {
+        app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_LEN, offset,
+                                length, NULL, 0U, resp_seq);
+        return;
+      }
+
+      robot_params_t updated;
+      memcpy(&updated, &g_robot_params, sizeof(updated));
+      memcpy((uint8_t *)&updated + offset, req_data, length);
+
+      bool changed = (memcmp(&updated, &g_robot_params, sizeof(updated)) != 0);
+      if (changed) {
+        memcpy(&g_robot_params, &updated, sizeof(updated));
+        motion_control_apply_params();
+      }
+
+      uint8_t status = ROBOT_RPC_STATUS_OK;
+      if ((req.flags & ROBOT_RPC_FLAG_SAVE) != 0U && changed) {
+        int rc = param_storage_save(&g_robot_params);
+        if (rc != PARAM_OK) {
+          status = ROBOT_RPC_STATUS_STORAGE;
+        }
+      }
+
+      app_rpc_send_param_resp(req.method, status, offset, length, NULL, 0U,
+                              resp_seq);
+      return;
+    }
+    default:
+      app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_METHOD, offset,
+                              length, NULL, 0U, resp_seq);
+      return;
+  }
 }
 
 static void app_cmd_handler(uint8_t msg_type, const uint8_t *payload,
@@ -607,10 +1306,27 @@ static void app_cmd_handler(uint8_t msg_type, const uint8_t *payload,
       return;
     }
     const robot_cmd_teleop_t *cmd = (const robot_cmd_teleop_t *)payload;
+    motion_control_set_teleop(cmd->vx_mps, cmd->wz_radps);
     APP_LOG_INFO("Teleop fwd=%.2f turn=%.2f flags=0x%04x", (double)cmd->vx_mps,
                  (double)cmd->wz_radps, cmd->flags);
   } else if (msg_type == ROBOT_MSG_CMD_HEARTBEAT) {
     // APP_LOG_INFO("Heartbeat received");
+  } else if (msg_type == ROBOT_MSG_CMD_ARM) {
+    APP_LOG_INFO("Arm requested");
+    if (!motion_control_can_arm()) {
+      APP_LOG_ERROR("Arm rejected (not ready)");
+      return;
+    }
+    motion_control_set_mode(MOTION_MODE_BALANCING);
+#ifdef ENABLE_MOTORS
+    motor_link_enable(true);
+#endif
+  } else if (msg_type == ROBOT_MSG_CMD_DISARM) {
+    APP_LOG_INFO("Disarm requested");
+    motion_control_set_mode(MOTION_MODE_DISARMED);
+#ifdef ENABLE_MOTORS
+    motor_link_enable(false);
+#endif
   } else if (msg_type == ROBOT_MSG_CMD_REBOOT) {
     uint8_t mode = (len > 0U) ? payload[0] : 0U;
     if (mode == 1U) {
@@ -735,32 +1451,122 @@ static bool app_link_send(uint8_t type, uint16_t flags, const uint8_t *payload,
   uint8_t encoded[ROBOT_FRAME_MAX_ENCODED];
   size_t encoded_len = 0U;
 
+  s_link_send_last_err = APP_LINK_SEND_OK;
+  s_link_send_last_status = 0U;
+  s_link_send_last_hal_state = 0U;
+  s_link_send_last_hal_err = 0U;
+
+  if (APP_LINK_UART == NULL) {
+    s_link_send_last_err = APP_LINK_SEND_ERR_UART_NULL;
+    return false;
+  }
+  if (app_in_isr()) {
+    s_link_send_last_err = APP_LINK_SEND_ERR_ISR;
+    return false;
+  }
+  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
+    s_link_send_last_err = APP_LINK_SEND_ERR_CTS_BLOCKED;
+    return false;
+  }
+
   uint16_t seq = (seq_override != 0U)
                      ? seq_override
                      : ++s_seq_counters[robot_channel_from_type(type)];
   if (!robot_frame_init(&frame, type, seq, flags, payload, len)) {
+    s_link_send_last_err = APP_LINK_SEND_ERR_FRAME_INIT;
     return false;
   }
   if (!robot_frame_encode(&frame, encoded, sizeof(encoded), &encoded_len)) {
+    s_link_send_last_err = APP_LINK_SEND_ERR_ENCODE;
     return false;
   }
 
-  return (HAL_UART_Transmit(APP_LINK_UART, encoded, (uint16_t)encoded_len,
-                            10U) == HAL_OK);
+  HAL_StatusTypeDef status =
+      HAL_UART_Transmit(APP_LINK_UART, encoded, (uint16_t)encoded_len, 10U);
+  if (status == HAL_OK) {
+    return true;
+  }
+  s_link_send_last_status = (uint32_t)status;
+  s_link_send_last_hal_state = (uint32_t)APP_LINK_UART->gState;
+  s_link_send_last_hal_err = (uint32_t)APP_LINK_UART->ErrorCode;
+  if (status == HAL_BUSY) {
+    s_link_send_last_err = APP_LINK_SEND_ERR_UART_BUSY;
+  } else if (status == HAL_TIMEOUT) {
+    s_link_send_last_err = APP_LINK_SEND_ERR_UART_TIMEOUT;
+  } else {
+    s_link_send_last_err = APP_LINK_SEND_ERR_UART_ERROR;
+  }
+  return false;
 }
 
 static void app_send_telem(void) {
-  robot_telem_v1_t telem;
+  robot_telem_v2_t telem;
   memset(&telem, 0, sizeof(telem));
-  telem.version = 1U;
-  telem.status = 0U;
+  telem.version = 2U;
   telem.timestamp_ms = HAL_GetTick();
-  telem.batt_v = 0.0f;
-  telem.batt_pct = 0.0f;
-  telem.temp_c = 0.0f;
 
-  if (!app_link_send(ROBOT_MSG_TELEM_FRAME, 0U, (const uint8_t *)&telem,
+  /* Motion mode and status */
+  motion_mode_t mode = motion_control_get_mode();
+  telem.motion_mode = (uint8_t)mode;
+  telem.status = 0U;
+  if (mode == MOTION_MODE_BALANCING) {
+    telem.status |= 0x01U; /* armed */
+  }
+  if (mode == MOTION_MODE_FAULT) {
+    telem.status |= 0x04U; /* fault */
+  }
+
+  /* EKF state estimate */
+  motion_control_estimate_t est;
+  if (motion_control_get_estimate(&est)) {
+    telem.theta_rad = est.theta_rad;
+    telem.theta_dot = est.theta_dot;
+    telem.x_m = est.x_m;
+    telem.x_dot_mps = est.x_dot_mps;
+    telem.gyro_bias = est.gyro_bias;
+    telem.estimate_valid = est.valid;
+  }
+
+  /* IMU health metrics */
+  motion_control_imu_health_t imu_health;
+  if (motion_control_get_imu_health(&imu_health)) {
+    telem.imu_active = imu_health.active_sensor;
+    telem.imu_gate_accel = imu_health.gate_accel;
+    telem.imu_gyro_diff_dps = imu_health.gyro_diff_dps;
+    telem.imu_vib_rms_g = imu_health.vib_rms_g;
+  }
+
+  /* Wheel velocities */
+#ifdef ENABLE_MOTORS
+  float left_w = 0.0f;
+  float right_w = 0.0f;
+  if (motor_link_get_wheel_velocities(&left_w, &right_w)) {
+    telem.wheel_left_rps = left_w;
+    telem.wheel_right_rps = right_w;
+    telem.status |= 0x08U; /* link_ok */
+  }
+  telem.motor_left_ack_timeouts = motor_link_get_left_ack_timeouts();
+  telem.motor_right_ack_timeouts = motor_link_get_right_ack_timeouts();
+#endif
+
+  /* Control outputs */
+  motion_control_output_t ctrl_out;
+  if (motion_control_get_control_output(&ctrl_out)) {
+    telem.iq_left = ctrl_out.iq_left;
+    telem.iq_right = ctrl_out.iq_right;
+    telem.pitch_target_rad = ctrl_out.pitch_target_rad;
+  }
+
+  if (!app_link_send(ROBOT_MSG_TELEM_FRAME_V2, 0U, (const uint8_t *)&telem,
                      sizeof(telem), 0U)) {
-    APP_LOG_ERROR("Failed to send telem frame");
+    unsigned long cts = (unsigned long)(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET);
+    unsigned long rts = (unsigned long)(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1) == GPIO_PIN_SET);
+    APP_LOG_ERROR("Failed to send telem frame reason=%s cts=%lu rts=%lu status=0x%lx state=0x%lx err=0x%lx",
+                  app_link_send_err_str(s_link_send_last_err),
+                  cts,
+                  rts,
+                  (unsigned long)s_link_send_last_status,
+                  (unsigned long)s_link_send_last_hal_state,
+                  (unsigned long)s_link_send_last_hal_err);
   }
 }

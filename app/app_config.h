@@ -14,10 +14,18 @@
 #define DEBUG_FAULTS 0
 #endif
 
+#ifndef MOTOR_LINK_DEBUG
+#define MOTOR_LINK_DEBUG 0
+#endif
+
 extern USBD_HandleTypeDef hUsbDeviceHS;
 extern UART_HandleTypeDef huart2;
+extern UART_HandleTypeDef huart1;
+extern UART_HandleTypeDef huart6;
 extern CRC_HandleTypeDef hcrc;
 #define APP_LINK_UART (&huart2)
+#define APP_MOTOR_LEFT_UART (&huart6)
+#define APP_MOTOR_RIGHT_UART (&huart1)
 
 #define APP_LOG_INFO(fmt, ...) app_log_printf("[APP][INFO] " fmt "\r\n", ##__VA_ARGS__)
 #define APP_LOG_ERROR(fmt, ...) app_log_printf("[APP][ERROR] " fmt "\r\n", ##__VA_ARGS__)

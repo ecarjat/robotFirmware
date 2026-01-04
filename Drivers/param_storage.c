@@ -1,4 +1,5 @@
 #include "param_storage.h"
+#include "config_control.h"
 #include "crc32.h"
 #include "stm32h7xx_hal.h"
 
@@ -369,7 +370,9 @@ int param_storage_save(const robot_params_t *params)
     }
 
     /* Build record in RAM */
-    uint8_t record_buf[256] __attribute__((aligned(32)));
+    uint8_t record_buf[PARAM_HEADER_SIZE + sizeof(robot_params_t) +
+                       PARAM_CRC_SIZE + PARAM_FLASHWORD_SIZE]
+        __attribute__((aligned(32)));
     memset(record_buf, 0xFF, sizeof(record_buf));
 
     if (record_size > sizeof(record_buf))
@@ -457,6 +460,22 @@ static void param_init_pid(pid_gains_t *pid, float kp, float ki, float kd,
     pid->max_output = max_output;
 }
 
+static void param_init_balance_gains(balance_gains_t *gains)
+{
+    gains->Kp_theta = BALANCE_DEFAULT_KP_THETA;
+    gains->Kd_theta = BALANCE_DEFAULT_KD_THETA;
+    gains->Kp_v_to_theta = BALANCE_DEFAULT_KP_V_TO_THETA;
+    gains->Ki_v_to_theta = BALANCE_DEFAULT_KI_V_TO_THETA;
+    gains->max_tilt_ref = BALANCE_DEFAULT_MAX_TILT_REF;
+    gains->Kv_damp = BALANCE_DEFAULT_KV_DAMP;
+    gains->K_turn = BALANCE_DEFAULT_K_TURN;
+    gains->K_yawDamp = BALANCE_DEFAULT_K_YAW_DAMP;
+    gains->alpha_yaw = BALANCE_DEFAULT_ALPHA_YAW;
+    gains->IqMax = BALANCE_DEFAULT_IQ_MAX;
+    gains->thetaKill = BALANCE_DEFAULT_THETA_KILL;
+    gains->iV_max = BALANCE_DEFAULT_IV_MAX;
+}
+
 void param_storage_get_defaults(robot_params_t *params)
 {
     if (params == NULL)
@@ -497,11 +516,17 @@ void param_storage_get_defaults(robot_params_t *params)
                    1.0f,   /* max_integral */
                    2.0f);  /* max_output (rad/s) */
 
+    /* Balance controller gains */
+    param_init_balance_gains(&params->balance);
+
     /* Motion limits */
     params->max_linear_vel_mps = 0.5f;
     params->max_angular_vel_rps = 2.0f;
     params->max_linear_accel_mps2 = 1.0f;
     params->max_angular_accel_rps2 = 4.0f;
+
+    /* Control loop */
+    params->control_rate_hz = CONTROL_DEFAULT_HZ;
 
     /* Communication */
     params->uart_baudrate = 115200U;

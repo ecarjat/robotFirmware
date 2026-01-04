@@ -4,7 +4,9 @@
 #include <string.h>
 
 #include "app_config.h"
+#include "command_defs.h"
 #include "main.h"
+#include "motor_link_framing.h"
 #include "stm32h7xx_hal.h"
 
 #ifndef MOTOR_LINK_TELEM_WARN_MS
@@ -27,24 +29,33 @@
 #define MOTOR_LINK_ACK_TIMEOUT_MS 200U
 #endif
 
-#ifndef MOTOR_LINK_TELEM_BASE_HZ
-#define MOTOR_LINK_TELEM_BASE_HZ 1000.0f
-#endif
 
 #ifndef MOTOR_LINK_TELEM_RATE_HZ
 #define MOTOR_LINK_TELEM_RATE_HZ 500.0f
 #endif
 
-#ifndef MOTOR_LINK_CONFIG_DOWNSAMPLE
-#define MOTOR_LINK_CONFIG_DOWNSAMPLE 10000U
+#ifndef MOTOR_LINK_TARGET_PERIOD_MS
+#define MOTOR_LINK_TARGET_PERIOD_MS 4U
+#endif
+
+#ifndef MOTOR_LINK_CONFIG_MIN_ELAPSED_US
+#define MOTOR_LINK_CONFIG_MIN_ELAPSED_US 1000000U
 #endif
 
 #ifndef MOTOR_LINK_FLOAT_EPS
 #define MOTOR_LINK_FLOAT_EPS 1.0e-4f
 #endif
 
+#ifndef MOTOR_LINK_TARGET_EPS
+#define MOTOR_LINK_TARGET_EPS 1.0e-3f
+#endif
+
 #ifndef MOTOR_LINK_RX_BUFFER_BYTES
 #define MOTOR_LINK_RX_BUFFER_BYTES 1024U
+#endif
+
+#ifndef MOTOR_LINK_RX_BUDGET_BYTES
+#define MOTOR_LINK_RX_BUDGET_BYTES 256U
 #endif
 
 #ifndef MOTOR_LINK_DEBUG
@@ -56,7 +67,7 @@
 #endif
 
 #ifndef MOTOR_LINK_TX_BUFFER_BYTES
-#define MOTOR_LINK_TX_BUFFER_BYTES 32U
+#define MOTOR_LINK_TX_BUFFER_BYTES 64U  /* Increased for robust framing with byte stuffing */
 #endif
 
 #ifndef MOTOR_LINK_PARSER_BUFFER_BYTES
@@ -65,12 +76,14 @@
 
 #define MOTOR_LINK_PI 3.14159265358979323846f
 
+/* Packet types - now using v2 protocol definitions from command_defs.h */
 enum
 {
-    MOTOR_LINK_BIN_MARKER = 0xA5,
-    MOTOR_LINK_TYPE_REG_REQ = 0x52,
-    MOTOR_LINK_TYPE_REG_RESP = 0x72,
-    MOTOR_LINK_TYPE_TELEM_DATA = 0x54
+    MOTOR_LINK_TYPE_REG_REQ = PKT_REG_REQUEST,    /* 'R' */
+    MOTOR_LINK_TYPE_REG_RESP = PKT_REG_RESPONSE,  /* 'r' */
+    MOTOR_LINK_TYPE_TELEM_DATA = PKT_TELEMETRY,   /* 'T' */
+    MOTOR_LINK_TYPE_CMD_REQ = PKT_CMD_REQUEST,    /* 'C' */
+    MOTOR_LINK_TYPE_CMD_RESP = PKT_CMD_RESPONSE   /* 'c' */
 };
 
 enum
@@ -84,7 +97,8 @@ enum
     MOTOR_LINK_REG_POSITION = 0x10,
     MOTOR_LINK_REG_VELOCITY = 0x11,
     MOTOR_LINK_REG_TELEMETRY_REG = 0x1A,
-    MOTOR_LINK_REG_TELEMETRY_DOWNSAMPLE = 0x1C
+    MOTOR_LINK_REG_TELEMETRY_DOWNSAMPLE = 0x1C,
+    MOTOR_LINK_REG_TELEMETRY_MIN_ELAPSED = 0x1E
 };
 
 typedef enum
@@ -96,13 +110,22 @@ typedef enum
     MOTOR_LINK_RT_BYTES
 } motor_link_reg_type_t;
 
+/* Command pending state for v2 protocol */
 typedef struct
 {
-    uint8_t buf[MOTOR_LINK_PARSER_BUFFER_BYTES];
-    size_t len;
-    uint32_t drops;
-    uint32_t drops_total;
-} motor_link_parser_t;
+    uint8_t active;
+    uint8_t cmd_id;
+    uint32_t sent_ms;
+} motor_link_cmd_pending_t;
+
+/* Command response for v2 protocol */
+typedef struct
+{
+    uint32_t t_ms;
+    uint8_t cmd_id;
+    uint8_t status;
+    uint8_t valid;
+} motor_link_cmd_response_t;
 
 typedef struct
 {
@@ -134,13 +157,17 @@ typedef struct
     uint8_t motor_id;
     uint8_t *tx_buf;
     uint16_t tx_len;
-    motor_link_parser_t parser;
-    motor_link_pending_t pending;
-    motor_link_ack_t last_ack;
+    frame_parser_t parser;              /* Robust framing parser (v2) */
+    motor_link_pending_t pending;       /* Pending register write */
+    motor_link_ack_t last_ack;          /* Last register ACK */
+    motor_link_cmd_pending_t cmd_pending;   /* Pending command (v2) */
+    motor_link_cmd_response_t last_cmd;     /* Last command response (v2) */
     uint32_t ack_seq;
     uint32_t last_ack_seq;
+    uint32_t cmd_seq;                   /* Command response sequence */
+    uint32_t last_cmd_seq;
     uint32_t ack_timeouts;
-    float telemetry_base_hz;
+    uint32_t cmd_timeouts;
 } motor_link_port_t;
 
 static uint8_t s_left_rx_buffer[MOTOR_LINK_RX_BUFFER_BYTES]
@@ -154,9 +181,6 @@ static uint8_t s_right_tx_buffer[MOTOR_LINK_TX_BUFFER_BYTES]
 
 static motor_link_port_t s_left_port;
 static motor_link_port_t s_right_port;
-
-extern UART_HandleTypeDef huart1;
-extern UART_HandleTypeDef huart6;
 
 typedef struct
 {
@@ -178,6 +202,11 @@ static float s_left_dir = 1.0f;
 static float s_right_dir = 1.0f;
 static float s_left_cmd = 0.0f;
 static float s_right_cmd = 0.0f;
+static float s_left_sent = 0.0f;
+static float s_right_sent = 0.0f;
+static uint8_t s_left_sent_valid = 0U;
+static uint8_t s_right_sent_valid = 0U;
+static uint32_t s_last_target_ms = 0U;
 static uint32_t s_left_parser_drops = 0U;
 static uint32_t s_right_parser_drops = 0U;
 static motor_telem_t s_left_telem;
@@ -296,6 +325,7 @@ static motor_link_reg_type_t motor_link_reg_type(uint8_t reg)
     case MOTOR_LINK_REG_MODULATION_MODE:
         return MOTOR_LINK_RT_U8;
     case MOTOR_LINK_REG_TELEMETRY_DOWNSAMPLE:
+    case MOTOR_LINK_REG_TELEMETRY_MIN_ELAPSED:
         return MOTOR_LINK_RT_U32;
     case MOTOR_LINK_REG_POSITION:
         return MOTOR_LINK_RT_I32_F32;
@@ -306,89 +336,7 @@ static motor_link_reg_type_t motor_link_reg_type(uint8_t reg)
     }
 }
 
-static void motor_link_parser_feed(motor_link_parser_t *parser,
-                                   const uint8_t *data,
-                                   size_t len)
-{
-    if (parser == NULL || data == NULL || len == 0U)
-    {
-        return;
-    }
-
-    if (len > MOTOR_LINK_PARSER_BUFFER_BYTES)
-    {
-        data += (len - MOTOR_LINK_PARSER_BUFFER_BYTES);
-        len = MOTOR_LINK_PARSER_BUFFER_BYTES;
-    }
-
-    if (parser->len + len > MOTOR_LINK_PARSER_BUFFER_BYTES)
-    {
-        size_t drop = (parser->len + len) - MOTOR_LINK_PARSER_BUFFER_BYTES;
-        parser->drops += drop;
-        memmove(parser->buf, parser->buf + drop, parser->len - drop);
-        parser->len -= drop;
-    }
-
-    memcpy(parser->buf + parser->len, data, len);
-    parser->len += len;
-}
-
-static bool motor_link_parser_try_parse(motor_link_parser_t *parser,
-                                        uint8_t *out_type,
-                                        const uint8_t **out_payload,
-                                        uint16_t *out_len)
-{
-    if (parser == NULL || parser->len < 3U)
-    {
-        return false;
-    }
-
-    size_t idx = 0U;
-    while (idx < parser->len && parser->buf[idx] != MOTOR_LINK_BIN_MARKER)
-    {
-        idx++;
-    }
-    if (idx > 0U)
-    {
-        memmove(parser->buf, parser->buf + idx, parser->len - idx);
-        parser->len -= idx;
-        if (parser->len < 3U)
-        {
-            return false;
-        }
-    }
-
-    uint8_t size_field = parser->buf[1];
-    if (size_field < 1U)
-    {
-        memmove(parser->buf, parser->buf + 1U, parser->len - 1U);
-        parser->len -= 1U;
-        return false;
-    }
-
-    size_t total = 2U + size_field;
-    if (parser->len < total)
-    {
-        return false;
-    }
-
-    if (out_type != NULL)
-    {
-        *out_type = parser->buf[2];
-    }
-    if (out_payload != NULL)
-    {
-        *out_payload = (size_field > 1U) ? (parser->buf + 3U) : NULL;
-    }
-    if (out_len != NULL)
-    {
-        *out_len = (uint16_t)(size_field - 1U);
-    }
-
-    memmove(parser->buf, parser->buf + total, parser->len - total);
-    parser->len -= total;
-    return true;
-}
+/* Old parser functions removed - now using frame_parser_feed/pop from motor_link_framing.h */
 
 static bool motor_link_ack_matches_expected(const motor_link_ack_t *ack,
                                             const motor_link_pending_t *pending)
@@ -401,7 +349,8 @@ static bool motor_link_ack_matches_expected(const motor_link_ack_t *ack,
     {
         return false;
     }
-    if (pending->reg == MOTOR_LINK_REG_TELEMETRY_REG)
+    if (pending->reg == MOTOR_LINK_REG_TELEMETRY_REG ||
+        pending->reg == MOTOR_LINK_REG_TELEMETRY_MIN_ELAPSED)
     {
         return true;
     }
@@ -453,7 +402,8 @@ static void motor_link_port_init(motor_link_port_t *port,
     port->tx_len = tx_len;
     port->rx_last_pos = 0U;
     port->motor_id = motor_id;
-    port->telemetry_base_hz = MOTOR_LINK_TELEM_BASE_HZ;
+    /* Initialize robust frame parser (v2 protocol) */
+    frame_parser_init(&port->parser);
 
     if (port->huart != NULL && port->rx_buf != NULL && port->rx_len > 0U)
     {
@@ -523,15 +473,21 @@ static bool motor_link_port_write_reg_raw(motor_link_port_t *port,
         return false;
     }
 
-    uint8_t frame[2U + 1U + 1U + 16U];
-    uint8_t size_field = (uint8_t)(1U + 1U + len);
-    frame[0] = MOTOR_LINK_BIN_MARKER;
-    frame[1] = size_field;
-    frame[2] = MOTOR_LINK_TYPE_REG_REQ;
-    frame[3] = reg;
+    /* Build payload: [REG][VALUE...] */
+    uint8_t payload[1U + 16U];
+    payload[0] = reg;
     if (len > 0U && value != NULL)
     {
-        memcpy(&frame[4], value, len);
+        memcpy(&payload[1], value, len);
+    }
+
+    /* Encode frame with robust framing (byte stuffing + CRC-32) */
+    uint8_t frame_buf[FRAME_MAX_ESCAPED_SIZE];
+    size_t frame_len = frame_encode(MOTOR_LINK_TYPE_REG_REQ, payload, 1U + len,
+                                     frame_buf, sizeof(frame_buf));
+    if (frame_len == 0U)
+    {
+        return false;
     }
 
     if (track_pending)
@@ -547,7 +503,7 @@ static bool motor_link_port_write_reg_raw(motor_link_port_t *port,
         port->pending.sent_ms = HAL_GetTick();
     }
 
-    if (!motor_link_port_send_frame(port, frame, (uint16_t)(2U + size_field)))
+    if (!motor_link_port_send_frame(port, frame_buf, (uint16_t)frame_len))
     {
         if (track_pending)
         {
@@ -610,10 +566,11 @@ static void motor_link_port_handle_ack(motor_link_port_t *port,
         memcpy(ack.raw, payload, ack.raw_len);
     }
     ack.valid = 1U;
+    bool expected = (port->pending.active && port->pending.reg == reg);
     ack.ok = motor_link_ack_matches_expected(&ack, &port->pending) ? 1U : 0U;
 
 #if MOTOR_LINK_DEBUG
-    if (!ack.ok)
+    if (!ack.ok && expected)
     {
         APP_LOG_ERROR("Motor link: %s ACK mismatch reg=0x%02X len=%u",
                       motor_link_port_name(port), (unsigned)reg,
@@ -625,7 +582,7 @@ static void motor_link_port_handle_ack(motor_link_port_t *port,
     }
 #endif
 
-    if (ack.ok && port->pending.active && port->pending.reg == reg)
+    if (expected)
     {
         port->pending.active = 0U;
     }
@@ -665,6 +622,42 @@ static void motor_link_port_handle_telemetry(motor_link_port_t *port,
     telem->status_valid = 1U;
 }
 
+static void motor_link_port_handle_cmd_response(motor_link_port_t *port,
+                                                 const uint8_t *payload,
+                                                 uint8_t len)
+{
+    if (port == NULL || payload == NULL || len < 2U)
+    {
+        return;
+    }
+
+    uint8_t cmd_id = payload[0];
+    uint8_t status = payload[1];
+
+    motor_link_cmd_response_t resp;
+    memset(&resp, 0, sizeof(resp));
+    resp.t_ms = HAL_GetTick();
+    resp.cmd_id = cmd_id;
+    resp.status = status;
+    resp.valid = 1U;
+
+    bool expected = (port->cmd_pending.active && port->cmd_pending.cmd_id == cmd_id);
+
+#if MOTOR_LINK_DEBUG
+    APP_LOG_INFO("Motor link: %s CMD resp id=0x%02X status=0x%02X%s",
+                 motor_link_port_name(port), (unsigned)cmd_id,
+                 (unsigned)status, expected ? "" : " (unexpected)");
+#endif
+
+    if (expected)
+    {
+        port->cmd_pending.active = 0U;
+    }
+
+    port->last_cmd = resp;
+    port->cmd_seq++;
+}
+
 static void motor_link_port_parse_frames(motor_link_port_t *port)
 {
     if (port == NULL)
@@ -674,9 +667,9 @@ static void motor_link_port_parse_frames(motor_link_port_t *port)
 
     uint8_t type = 0U;
     const uint8_t *payload = NULL;
-    uint16_t plen = 0U;
+    uint8_t plen = 0U;
 
-    while (motor_link_parser_try_parse(&port->parser, &type, &payload, &plen))
+    while (frame_parser_pop(&port->parser, &type, &payload, &plen))
     {
         if (type == MOTOR_LINK_TYPE_TELEM_DATA)
         {
@@ -701,13 +694,13 @@ static void motor_link_port_parse_frames(motor_link_port_t *port)
 #endif
             }
         }
+        else if (type == MOTOR_LINK_TYPE_CMD_RESP)
+        {
+            motor_link_port_handle_cmd_response(port, payload, plen);
+        }
     }
 
-    if (port->parser.drops > 0U)
-    {
-        port->parser.drops_total += port->parser.drops;
-        port->parser.drops = 0U;
-    }
+    /* sync_losses is tracked in frame_parser_t, no need for separate drops counter */
 }
 
 static void motor_link_port_pump_rx(motor_link_port_t *port)
@@ -731,27 +724,35 @@ static void motor_link_port_pump_rx(motor_link_port_t *port)
         pos = 0U;
     }
 
-    if (pos != port->rx_last_pos)
+    if (pos == port->rx_last_pos)
     {
-        if (pos > port->rx_last_pos)
-        {
-            motor_link_parser_feed(&port->parser,
-                                   &port->rx_buf[port->rx_last_pos],
-                                   pos - port->rx_last_pos);
-        }
-        else
-        {
-            motor_link_parser_feed(&port->parser,
-                                   &port->rx_buf[port->rx_last_pos],
-                                   buf_size - port->rx_last_pos);
-            if (pos > 0U)
-            {
-                motor_link_parser_feed(&port->parser, &port->rx_buf[0], pos);
-            }
-        }
-        port->rx_last_pos = (uint16_t)pos;
-        motor_link_port_parse_frames(port);
+        return;
     }
+
+    size_t available = (pos >= port->rx_last_pos)
+                           ? (pos - port->rx_last_pos)
+                           : (buf_size - port->rx_last_pos + pos);
+    size_t budget = MOTOR_LINK_RX_BUDGET_BYTES;
+    size_t to_process = (available < budget) ? available : budget;
+    if (to_process == 0U)
+    {
+        return;
+    }
+
+    size_t idx = port->rx_last_pos;
+    for (size_t i = 0U; i < to_process; ++i)
+    {
+        uint8_t byte = port->rx_buf[idx];
+        frame_parser_feed(&port->parser, &byte, 1U);
+        motor_link_port_parse_frames(port);
+        idx++;
+        if (idx >= buf_size)
+        {
+            idx = 0U;
+        }
+    }
+
+    port->rx_last_pos = (uint16_t)idx;
 }
 
 static bool motor_link_port_wait_ack(motor_link_port_t *port,
@@ -779,6 +780,11 @@ static bool motor_link_port_wait_ack(motor_link_port_t *port,
             }
         }
         HAL_Delay(1);
+    }
+
+    if (port->pending.active && port->pending.reg == reg)
+    {
+        port->pending.active = 0U;
     }
 
     port->ack_timeouts++;
@@ -824,18 +830,34 @@ static bool motor_link_port_set_telemetry_registers(motor_link_port_t *port,
                                     timeout_ms, NULL);
 }
 
-static bool motor_link_port_set_telemetry_downsample(motor_link_port_t *port,
-                                                     uint32_t downsample,
-                                                     uint32_t timeout_ms,
-                                                     bool wait_ack)
+static uint32_t motor_link_hz_to_min_elapsed_us(float target_hz)
 {
-    if (downsample == 0U)
+    if (target_hz <= 0.0f)
     {
-        downsample = 1U;
+        return 0U;
     }
 
-    if (!motor_link_port_write_reg_u32(port, MOTOR_LINK_REG_TELEMETRY_DOWNSAMPLE,
-                                       downsample, wait_ack))
+    float period_us = 1000000.0f / target_hz;
+    if (period_us < 1.0f)
+    {
+        period_us = 1.0f;
+    }
+
+    if (period_us > (float)UINT32_MAX)
+    {
+        period_us = (float)UINT32_MAX;
+    }
+
+    return (uint32_t)lroundf(period_us);
+}
+
+static bool motor_link_port_set_telemetry_min_elapsed(motor_link_port_t *port,
+                                                      uint32_t min_elapsed_us,
+                                                      uint32_t timeout_ms,
+                                                      bool wait_ack)
+{
+    if (!motor_link_port_write_reg_u32(port, MOTOR_LINK_REG_TELEMETRY_MIN_ELAPSED,
+                                       min_elapsed_us, wait_ack))
     {
         return false;
     }
@@ -845,7 +867,7 @@ static bool motor_link_port_set_telemetry_downsample(motor_link_port_t *port,
         return true;
     }
 
-    return motor_link_port_wait_ack(port, MOTOR_LINK_REG_TELEMETRY_DOWNSAMPLE,
+    return motor_link_port_wait_ack(port, MOTOR_LINK_REG_TELEMETRY_MIN_ELAPSED,
                                     timeout_ms, NULL);
 }
 
@@ -853,19 +875,9 @@ static bool motor_link_port_set_telemetry_rate(motor_link_port_t *port,
                                                float target_hz,
                                                uint32_t timeout_ms)
 {
-    if (target_hz <= 0.0f || port->telemetry_base_hz <= 0.0f)
-    {
-        return false;
-    }
-
-    float ds_f = port->telemetry_base_hz / target_hz;
-    uint32_t ds = (uint32_t)lroundf(ds_f);
-    if (ds < 1U)
-    {
-        ds = 1U;
-    }
-
-    return motor_link_port_set_telemetry_downsample(port, ds, timeout_ms, true);
+    uint32_t min_elapsed_us = motor_link_hz_to_min_elapsed_us(target_hz);
+    return motor_link_port_set_telemetry_min_elapsed(port, min_elapsed_us,
+                                                     timeout_ms, true);
 }
 
 static bool motor_link_port_wait_for_traffic(motor_link_port_t *port,
@@ -891,6 +903,28 @@ static bool motor_link_port_wait_for_traffic(motor_link_port_t *port,
     return false;
 }
 
+static bool motor_link_port_wait_for_telem(motor_link_port_t *port,
+                                           motor_telem_t *telem,
+                                           uint32_t timeout_ms)
+{
+    if (port == NULL || telem == NULL)
+    {
+        return false;
+    }
+
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < timeout_ms)
+    {
+        motor_link_port_pump_rx(port);
+        if (telem->vel_valid || telem->status_valid)
+        {
+            return true;
+        }
+        HAL_Delay(10);
+    }
+    return false;
+}
+
 static float motor_link_clamp(float v, float limit)
 {
     if (limit <= 0.0f)
@@ -906,6 +940,11 @@ static float motor_link_clamp(float v, float limit)
         return -limit;
     }
     return v;
+}
+
+static bool motor_link_commands_ready(void)
+{
+    return (s_left_telem.vel_valid && s_right_telem.vel_valid);
 }
 
 static float motor_link_resolve_kt(void)
@@ -927,6 +966,11 @@ bool motor_link_init(void)
     memset(&s_right_telem, 0, sizeof(s_right_telem));
     s_left_cmd = 0.0f;
     s_right_cmd = 0.0f;
+    s_left_sent = 0.0f;
+    s_right_sent = 0.0f;
+    s_left_sent_valid = 0U;
+    s_right_sent_valid = 0U;
+    s_last_target_ms = 0U;
     s_control_mode = MOTOR_CONTROL_TORQUE;
     s_enable_applied = 0U;
     s_left_dir = 1.0f;
@@ -935,11 +979,11 @@ bool motor_link_init(void)
     s_right_parser_drops = 0U;
 
     s_config_in_progress = 1U;
-    motor_link_port_init(&s_left_port, &huart1, s_left_rx_buffer,
+    motor_link_port_init(&s_left_port, APP_MOTOR_LEFT_UART, s_left_rx_buffer,
                          (uint16_t)sizeof(s_left_rx_buffer),
                          s_left_tx_buffer,
                          (uint16_t)sizeof(s_left_tx_buffer), 0U);
-    motor_link_port_init(&s_right_port, &huart6, s_right_rx_buffer,
+    motor_link_port_init(&s_right_port, APP_MOTOR_RIGHT_UART, s_right_rx_buffer,
                          (uint16_t)sizeof(s_right_rx_buffer),
                          s_right_tx_buffer,
                          (uint16_t)sizeof(s_right_tx_buffer), 0U);
@@ -947,14 +991,23 @@ bool motor_link_init(void)
     (void)motor_link_port_wait_for_traffic(&s_left_port, 2000U);
     (void)motor_link_port_wait_for_traffic(&s_right_port, 2000U);
 
-    (void)motor_link_port_set_telemetry_downsample(&s_left_port,
-                                                   MOTOR_LINK_CONFIG_DOWNSAMPLE,
-                                                   MOTOR_LINK_ACK_TIMEOUT_MS,
-                                                   false);
-    (void)motor_link_port_set_telemetry_downsample(&s_right_port,
-                                                   MOTOR_LINK_CONFIG_DOWNSAMPLE,
-                                                   MOTOR_LINK_ACK_TIMEOUT_MS,
-                                                   false);
+    if (!motor_link_port_wait_for_telem(&s_left_port, &s_left_telem, 2000U))
+    {
+        APP_LOG_ERROR("Motor link: left telemetry not seen yet");
+    }
+    if (!motor_link_port_wait_for_telem(&s_right_port, &s_right_telem, 2000U))
+    {
+        APP_LOG_ERROR("Motor link: right telemetry not seen yet");
+    }
+
+    (void)motor_link_port_set_telemetry_min_elapsed(&s_left_port,
+                                                    MOTOR_LINK_CONFIG_MIN_ELAPSED_US,
+                                                    MOTOR_LINK_ACK_TIMEOUT_MS,
+                                                    false);
+    (void)motor_link_port_set_telemetry_min_elapsed(&s_right_port,
+                                                    MOTOR_LINK_CONFIG_MIN_ELAPSED_US,
+                                                    MOTOR_LINK_ACK_TIMEOUT_MS,
+                                                    false);
     HAL_Delay(400);
 
     const uint8_t telem_regs[] = {MOTOR_LINK_REG_VELOCITY, MOTOR_LINK_REG_STATUS};
@@ -1065,7 +1118,7 @@ bool motor_link_init(void)
 
     s_initialized = 1U;
     s_config_in_progress = 0U;
-    APP_LOG_INFO("Motor link initialized (BinaryIO)");
+    APP_LOG_INFO("Motor link initialized (RobustBinaryIO v2)");
     return true;
 }
 
@@ -1078,8 +1131,9 @@ void motor_link_poll(void)
 
     motor_link_port_pump_rx(&s_left_port);
     motor_link_port_pump_rx(&s_right_port);
-    s_left_parser_drops = s_left_port.parser.drops_total;
-    s_right_parser_drops = s_right_port.parser.drops_total;
+    /* Use sync_losses from robust frame parser (v2) */
+    s_left_parser_drops = s_left_port.parser.sync_losses;
+    s_right_parser_drops = s_right_port.parser.sync_losses;
 }
 
 void motor_link_enable(bool on)
@@ -1089,6 +1143,7 @@ void motor_link_enable(bool on)
         return;
     }
 
+    bool was_enabled = (s_enable_applied != 0U);
     s_enable_applied = on ? 1U : 0U;
 
 #if defined(MOTORS_ENABLE_GPIO_Port) && defined(MOTORS_ENABLE_Pin)
@@ -1096,6 +1151,28 @@ void motor_link_enable(bool on)
                       MOTORS_ENABLE_Pin,
                       on ? GPIO_PIN_SET : GPIO_PIN_RESET);
 #endif
+
+    if (!on && was_enabled)
+    {
+        if (!s_left_port.pending.active &&
+            motor_link_port_write_reg_f32(&s_left_port, MOTOR_LINK_REG_TARGET,
+                                          0.0f, true))
+        {
+            (void)motor_link_port_wait_ack(&s_left_port, MOTOR_LINK_REG_TARGET,
+                                           MOTOR_LINK_ACK_TIMEOUT_MS, NULL);
+            s_left_sent = 0.0f;
+            s_left_sent_valid = 1U;
+        }
+        if (!s_right_port.pending.active &&
+            motor_link_port_write_reg_f32(&s_right_port, MOTOR_LINK_REG_TARGET,
+                                          0.0f, true))
+        {
+            (void)motor_link_port_wait_ack(&s_right_port, MOTOR_LINK_REG_TARGET,
+                                           MOTOR_LINK_ACK_TIMEOUT_MS, NULL);
+            s_right_sent = 0.0f;
+            s_right_sent_valid = 1U;
+        }
+    }
 
     (void)motor_link_port_write_reg_u8(&s_left_port, MOTOR_LINK_REG_ENABLE,
                                        on ? 1U : 0U, false);
@@ -1144,6 +1221,15 @@ motor_control_mode_t motor_link_get_control_mode(void)
     return s_control_mode;
 }
 
+void motor_link_set_motor_directions(int8_t left_dir, int8_t right_dir)
+{
+    float left = (left_dir < 0) ? -1.0f : 1.0f;
+    float right = (right_dir < 0) ? -1.0f : 1.0f;
+
+    s_left_dir = left;
+    s_right_dir = right;
+}
+
 void motor_link_set_wheel_Iq(float left_A, float right_A, float max_A)
 {
     if (!s_initialized || s_control_mode != MOTOR_CONTROL_TORQUE)
@@ -1155,26 +1241,60 @@ void motor_link_set_wheel_Iq(float left_A, float right_A, float max_A)
     float right = motor_link_clamp(right_A * s_right_dir, max_A);
     if (!s_enable_applied)
     {
-        left = 0.0f;
-        right = 0.0f;
+        s_left_cmd = 0.0f;
+        s_right_cmd = 0.0f;
+        return;
     }
 
     s_left_cmd = left;
     s_right_cmd = right;
 
+    if (!motor_link_commands_ready())
+    {
+        APP_LOG_INFO("Command not ready");
+        return;
+    }
+
     if (s_config_in_progress)
     {
         return;
     }
-    if (!s_left_port.pending.active)
+
+    bool left_changed = !s_left_sent_valid ||
+                        (fabsf(left - s_left_sent) > MOTOR_LINK_TARGET_EPS);
+    bool right_changed = !s_right_sent_valid ||
+                         (fabsf(right - s_right_sent) > MOTOR_LINK_TARGET_EPS);
+    if (!left_changed && !right_changed)
+    {
+        return;
+    }
+
+    uint32_t now_ms = HAL_GetTick();
+    if ((now_ms - s_last_target_ms) < MOTOR_LINK_TARGET_PERIOD_MS)
+    {
+        return;
+    }
+
+    bool sent = false;
+    if (left_changed && !s_left_port.pending.active)
     {
         (void)motor_link_port_write_reg_f32(&s_left_port, MOTOR_LINK_REG_TARGET,
                                             left, false);
+        s_left_sent = left;
+        s_left_sent_valid = 1U;
+        sent = true;
     }
-    if (!s_right_port.pending.active)
+    if (right_changed && !s_right_port.pending.active)
     {
         (void)motor_link_port_write_reg_f32(&s_right_port, MOTOR_LINK_REG_TARGET,
                                             right, false);
+        s_right_sent = right;
+        s_right_sent_valid = 1U;
+        sent = true;
+    }
+    if (sent)
+    {
+        s_last_target_ms = now_ms;
     }
 }
 
@@ -1259,4 +1379,146 @@ uint32_t motor_link_get_left_telem_late(void)
 uint32_t motor_link_get_right_telem_late(void)
 {
     return s_right_telem.late_count;
+}
+
+uint32_t motor_link_get_left_ack_timeouts(void)
+{
+    return s_left_port.ack_timeouts;
+}
+
+uint32_t motor_link_get_right_ack_timeouts(void)
+{
+    return s_right_port.ack_timeouts;
+}
+
+uint32_t motor_link_get_left_sync_losses(void)
+{
+    return s_left_port.parser.sync_losses;
+}
+
+uint32_t motor_link_get_right_sync_losses(void)
+{
+    return s_right_port.parser.sync_losses;
+}
+
+uint32_t motor_link_get_left_crc_errors(void)
+{
+    return s_left_port.parser.crc_errors;
+}
+
+uint32_t motor_link_get_right_crc_errors(void)
+{
+    return s_right_port.parser.crc_errors;
+}
+
+/* Command API (v2 protocol) */
+
+static motor_link_port_t *motor_link_get_port(motor_side_t side)
+{
+    return (side == MOTOR_SIDE_LEFT) ? &s_left_port : &s_right_port;
+}
+
+bool motor_link_send_command(motor_side_t side, uint8_t cmd_id)
+{
+    if (!s_initialized)
+    {
+        return false;
+    }
+
+    motor_link_port_t *port = motor_link_get_port(side);
+    if (port == NULL || port->huart == NULL)
+    {
+        return false;
+    }
+
+    /* Encode command frame using robust framing */
+    uint8_t payload[1] = { cmd_id };
+    uint8_t frame_buf[FRAME_MAX_ESCAPED_SIZE];
+    size_t frame_len = frame_encode(MOTOR_LINK_TYPE_CMD_REQ, payload, 1U,
+                                     frame_buf, sizeof(frame_buf));
+    if (frame_len == 0U)
+    {
+        return false;
+    }
+
+    /* Track pending command */
+    port->cmd_pending.active = 1U;
+    port->cmd_pending.cmd_id = cmd_id;
+    port->cmd_pending.sent_ms = HAL_GetTick();
+
+    if (!motor_link_port_send_frame(port, frame_buf, (uint16_t)frame_len))
+    {
+        port->cmd_pending.active = 0U;
+        return false;
+    }
+
+#if MOTOR_LINK_DEBUG
+    APP_LOG_INFO("Motor link: %s CMD send id=0x%02X",
+                 motor_link_port_name(port), (unsigned)cmd_id);
+#endif
+
+    return true;
+}
+
+bool motor_link_send_write(motor_side_t side)
+{
+    return motor_link_send_command(side, CMD_WRITE);
+}
+
+bool motor_link_send_calibrate(motor_side_t side)
+{
+    return motor_link_send_command(side, CMD_CALIBRATE);
+}
+
+bool motor_link_send_bootloader(motor_side_t side)
+{
+    return motor_link_send_command(side, CMD_BOOTLOADER);
+}
+
+motor_cmd_result_t motor_link_wait_command(motor_side_t side, uint8_t cmd_id,
+                                            uint32_t timeout_ms)
+{
+    motor_link_port_t *port = motor_link_get_port(side);
+    if (port == NULL)
+    {
+        return MOTOR_CMD_ERROR;
+    }
+
+    uint32_t start = HAL_GetTick();
+    uint32_t last_seq = port->last_cmd_seq;
+
+    while ((HAL_GetTick() - start) < timeout_ms)
+    {
+        motor_link_port_pump_rx(port);
+        if (port->cmd_seq != last_seq)
+        {
+            last_seq = port->cmd_seq;
+            port->last_cmd_seq = last_seq;
+            if (port->last_cmd.valid && port->last_cmd.cmd_id == cmd_id)
+            {
+                switch (port->last_cmd.status)
+                {
+                case CMD_STATUS_OK:
+                    return MOTOR_CMD_OK;
+                case CMD_STATUS_ERROR:
+                    return MOTOR_CMD_ERROR;
+                case CMD_STATUS_BUSY:
+                    return MOTOR_CMD_BUSY;
+                case CMD_STATUS_UNKNOWN:
+                    return MOTOR_CMD_UNKNOWN;
+                default:
+                    return MOTOR_CMD_ERROR;
+                }
+            }
+        }
+        HAL_Delay(1);
+    }
+
+    if (port->cmd_pending.active && port->cmd_pending.cmd_id == cmd_id)
+    {
+        port->cmd_pending.active = 0U;
+    }
+
+    port->cmd_timeouts++;
+    return MOTOR_CMD_TIMEOUT;
 }

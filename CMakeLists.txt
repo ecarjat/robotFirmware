@@ -11,6 +11,9 @@ cmake_minimum_required(VERSION 3.22)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS ON)
 
 
 # Define the build type
@@ -28,8 +31,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
-# Enable CMake support for ASM and C languages
-enable_language(C ASM)
+# Enable CMake support for ASM, C, and C++
+enable_language(C ASM CXX)
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
@@ -50,15 +53,27 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     common/mux_channels.c
     common/shared_protocol/robot_protocol.c
     utils/log.c
+    control/MotionController.cpp
+    control/StateEstimator.cpp
+    control/ekf/BalancerEKF.cpp
+    control/motion_modes.cpp
+    control/motion_control.cpp
     drivers/imu/imu_bus.c
     drivers/imu/imu_bmi270.c
+    drivers/imu/imu_bmm150.c
     drivers/imu/imu_icm42688.c
     drivers/imu/imu_exti.c
     drivers/imu/imu_bus_sched.c
     drivers/imu/imu_sched.c
+    drivers/motors/motor_link.c
+    drivers/motors/motor_link_framing.c
+    drivers/param_storage.c
+    drivers/system_reboot.c
     drivers/spi_bus.c
+    drivers/debug_wdog.c
     libs/BMI270_SensorAPI/bmi2.c
     libs/BMI270_SensorAPI/bmi270.c
+    libs/BMM150_SensorAPI/bmm150.c
 )
 
 # Add include paths
@@ -66,10 +81,15 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     app
     common
     common/shared_protocol
+    control
+    control/ekf
     drivers
     drivers/imu
+    drivers/motors
     utils
     libs/BMI270_SensorAPI
+    libs/BMM150_SensorAPI
+    libs/TinyEKF
 )
 
 # Add project symbols (macros)
