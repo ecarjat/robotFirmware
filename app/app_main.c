@@ -1616,6 +1616,9 @@ static void app_send_telem(void) {
   if (s_estop_active) {
     telem.status |= ROBOT_STATUS_ESTOP;
   }
+  if (motion_control_is_calibrated()) {
+    telem.status |= ROBOT_STATUS_IMU_CAL;
+  }
 
   /* EKF state estimate */
   motion_control_estimate_t est;

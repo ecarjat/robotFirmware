@@ -40,7 +40,7 @@ extern "C" {
  */
 
 #define PARAM_MAGIC             0x524F424FUL  /* 'ROBO' */
-#define PARAM_VERSION           3U
+#define PARAM_VERSION           4U
 #define PARAM_FLASH_BASE        0x080C0000UL
 #define PARAM_FLASH_SIZE        0x00020000UL  /* 128 KB */
 #define PARAM_FLASH_END         (PARAM_FLASH_BASE + PARAM_FLASH_SIZE)
@@ -74,17 +74,6 @@ typedef struct {
     int16_t hard_iron[3];       /* uT offset (hard iron correction) */
     float   soft_iron[9];       /* 3x3 soft iron correction matrix */
 } mag_calib_t;
-
-/**
- * @brief Motion controller PID gains
- */
-typedef struct {
-    float kp;
-    float ki;
-    float kd;
-    float max_integral;         /* Anti-windup limit */
-    float max_output;
-} pid_gains_t;
 
 /**
  * @brief Balance controller gains (outer loop)
@@ -126,10 +115,6 @@ typedef struct {
 
     /* Magnetometer calibration (BMM150) */
     mag_calib_t mag_bmm150;
-
-    /* Motion controller PID gains */
-    pid_gains_t motion_linear;  /* Linear velocity controller */
-    pid_gains_t motion_angular; /* Angular velocity controller */
 
     /* Balance controller gains */
     balance_gains_t balance;

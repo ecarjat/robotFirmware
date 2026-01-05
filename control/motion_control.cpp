@@ -254,7 +254,7 @@ static bool imu_calib_is_valid(const imu_calib_t *calib)
  *
  * Both BMI270 and ICM42688 (if enabled) must have valid calibration.
  */
-static bool motion_control_is_calibrated(void)
+bool motion_control_is_calibrated(void)
 {
     /* BMI270 is always required */
     if (!imu_calib_is_valid(&g_robot_params.imu_bmi270))

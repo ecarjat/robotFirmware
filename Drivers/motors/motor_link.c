@@ -534,10 +534,11 @@ static void motor_link_port_handle_telemetry(motor_link_port_t *port,
   memcpy(&velocity, data, 4U);
   uint8_t status = data[4];
 
+  const int8_t dir = (port == &s_left_port) ? s_left_dir : s_right_dir;
   motor_telem_t *telem =
       (port == &s_left_port) ? &s_left_telem : &s_right_telem;
   uint32_t now = HAL_GetTick();
-  telem->velocity = velocity;
+  telem->velocity = velocity * (float)dir;
   telem->status = status;
   telem->last_vel_ms = now;
   telem->last_status_ms = now;

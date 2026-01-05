@@ -462,19 +462,6 @@ static void param_init_mag_calib(mag_calib_t *calib)
     calib->soft_iron[8] = 1.0f;  /* [2][2] */
 }
 
-/**
- * @brief Initialize PID gains to reasonable defaults
- */
-static void param_init_pid(pid_gains_t *pid, float kp, float ki, float kd,
-                           float max_integral, float max_output)
-{
-    pid->kp = kp;
-    pid->ki = ki;
-    pid->kd = kd;
-    pid->max_integral = max_integral;
-    pid->max_output = max_output;
-}
-
 static void param_init_balance_gains(balance_gains_t *gains)
 {
     gains->Kp_theta = BALANCE_DEFAULT_KP_THETA;
@@ -515,21 +502,6 @@ void param_storage_get_defaults(robot_params_t *params)
 
     /* Magnetometer calibration */
     param_init_mag_calib(&params->mag_bmm150);
-
-    /* Motion controller PID defaults */
-    param_init_pid(&params->motion_linear,
-                   1.0f,   /* kp */
-                   0.1f,   /* ki */
-                   0.01f,  /* kd */
-                   0.5f,   /* max_integral */
-                   1.0f);  /* max_output */
-
-    param_init_pid(&params->motion_angular,
-                   2.0f,   /* kp */
-                   0.2f,   /* ki */
-                   0.02f,  /* kd */
-                   1.0f,   /* max_integral */
-                   2.0f);  /* max_output (rad/s) */
 
     /* Balance controller gains */
     param_init_balance_gains(&params->balance);

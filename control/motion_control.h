@@ -17,6 +17,7 @@ motion_mode_t motion_control_get_mode(void);
 void motion_control_set_output_enabled(bool enabled);
 void motion_control_set_teleop(float forward_cmd, float turn_cmd);
 bool motion_control_can_arm(void);
+bool motion_control_is_calibrated(void);
 uint32_t motion_control_get_last_imu_ok_ms(void);
 uint32_t motion_control_get_last_motor_ok_ms(void);
 bool motion_control_get_yaw_debug(float *gyro_z, float *yaw_rate_enc, float *yaw_rate);
