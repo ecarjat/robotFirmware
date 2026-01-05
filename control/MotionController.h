@@ -38,6 +38,8 @@ public:
     float getLastPitchI() const { return _lastPitchI; }
     float getLastPitchD() const { return _lastPitchD; }
 
+    bool isOutputSaturated() const { return _lastSaturated; }
+
     Command computeControl(const StateEstimate& state, float dtSeconds);
 
     void resetPidState();
@@ -108,6 +110,7 @@ private:
     float _lastPitchP = 0.0f;
     float _lastPitchI = 0.0f;
     float _lastPitchD = 0.0f;
+    bool _lastSaturated = false;
 
     static constexpr float DERIVATIVE_FILTER_ALPHA = 0.1f;
 };

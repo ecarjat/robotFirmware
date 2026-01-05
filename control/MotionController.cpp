@@ -2,6 +2,14 @@
 
 #include <math.h>
 
+/* Threshold for detecting near-zero gain values to avoid division by zero.
+ * Gains smaller than this are treated as disabled (effectively zero). */
+static constexpr float kGainEpsilon = 1e-6f;
+
+/* Default integral limit when Ki is disabled or iMax not configured.
+ * Uses a large but finite value to prevent unbounded windup. */
+static constexpr float kDefaultIntegralLimit = 1000.0f;
+
 MotionController::MotionController(const RobotParams& robotParams)
     : _robot(robotParams),
       _teleopForward(0.0f),
@@ -173,6 +181,13 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     Command cmd{};
     cmd.iq = {0.0f, 0.0f};
 
+    /* Compute velocity PID integral limit:
+     * - If Ki and iMax are configured, limit = iMax/Ki (in velocity units)
+     * - Otherwise use a large default to prevent unbounded windup */
+    float velIntegralLimit = ((_velPid_Ki > kGainEpsilon) && (_velPid_iMax > 0.0f))
+        ? (_velPid_iMax / _velPid_Ki)
+        : kDefaultIntegralLimit;
+
     float pitchTarget = computePid(
         _velocityPid,
         _targetVel,
@@ -180,8 +195,7 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
         dtSeconds,
         _velPid_Kp, _velPid_Ki, _velPid_Kd,
         _maxPitchTarget,
-        (_velPid_Ki > 1e-6f && _velPid_iMax > 0.0f) ? (_velPid_iMax / _velPid_Ki)
-                                                    : _maxPitchTarget
+        velIntegralLimit
     );
 
     float pitchError = state.theta - pitchTarget;
@@ -191,7 +205,7 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
 
     float maxIq = 0.0f;
     float maxIqPhysical = 0.0f;
-    if (_motorKt > 1e-6f) {
+    if (_motorKt > kGainEpsilon) {
         maxIqPhysical = _maxWheelTorque / _motorKt;
     }
     if (_iqMax > 0.0f && maxIqPhysical > 0.0f) {
@@ -213,9 +227,11 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     {
         _pitchPid.integral += pitchError * dtSeconds;
     }
-    float integralLimit = (_pitchPid_Ki > 1e-6f)
+    /* Pitch PID integral limit: if Ki is configured, limit in pitch error units;
+     * otherwise use outputLimit directly (effectively disabling anti-windup) */
+    float integralLimit = (_pitchPid_Ki > kGainEpsilon)
         ? outputLimit / _pitchPid_Ki
-        : outputLimit;
+        : kDefaultIntegralLimit;
     if (_pitchPid.integral > integralLimit) _pitchPid.integral = integralLimit;
     if (_pitchPid.integral < -integralLimit) _pitchPid.integral = -integralLimit;
 
@@ -235,11 +251,12 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     out.iqLeft = uCommon - uTurn;
     out.iqRight = uCommon + uTurn;
 
+    _lastSaturated = false;
     if (maxIq > 0.0f) {
-        if (out.iqLeft > maxIq) out.iqLeft = maxIq;
-        if (out.iqLeft < -maxIq) out.iqLeft = -maxIq;
-        if (out.iqRight > maxIq) out.iqRight = maxIq;
-        if (out.iqRight < -maxIq) out.iqRight = -maxIq;
+        if (out.iqLeft > maxIq) { out.iqLeft = maxIq; _lastSaturated = true; }
+        if (out.iqLeft < -maxIq) { out.iqLeft = -maxIq; _lastSaturated = true; }
+        if (out.iqRight > maxIq) { out.iqRight = maxIq; _lastSaturated = true; }
+        if (out.iqRight < -maxIq) { out.iqRight = -maxIq; _lastSaturated = true; }
     }
 
     _lastPitchTarget = pitchTarget;

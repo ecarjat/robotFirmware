@@ -220,18 +220,13 @@ uint32_t motion_control_get_last_motor_ok_ms(void)
 }
 
 /**
- * @brief Check if IMU calibration has been performed
+ * @brief Check if a single IMU calibration has been performed
  *
- * Calibration is considered valid if at least one gyro bias value is non-zero
- * for the primary IMU (BMI270). A fresh/uncalibrated robot has all biases = 0.
- *
- * Per MainControl.md Section 8.4:
- * "Robot cannot enter BALANCING mode until valid calibration exists in params."
+ * Calibration is considered valid if at least one gyro or accel bias value
+ * is non-zero. A fresh/uncalibrated sensor has all biases = 0.
  */
-static bool motion_control_is_calibrated(void)
+static bool imu_calib_is_valid(const imu_calib_t *calib)
 {
-    const imu_calib_t *calib = &g_robot_params.imu_bmi270;
-
     /* Check if any gyro bias is non-zero (indicates calibration was done) */
     if (calib->gyro_bias[0] != 0 ||
         calib->gyro_bias[1] != 0 ||
@@ -249,6 +244,33 @@ static bool motion_control_is_calibrated(void)
     }
 
     return false;
+}
+
+/**
+ * @brief Check if all enabled IMUs have been calibrated
+ *
+ * Per MainControl.md Section 8.4:
+ * "Robot cannot enter BALANCING mode until valid calibration exists in params."
+ *
+ * Both BMI270 and ICM42688 (if enabled) must have valid calibration.
+ */
+static bool motion_control_is_calibrated(void)
+{
+    /* BMI270 is always required */
+    if (!imu_calib_is_valid(&g_robot_params.imu_bmi270))
+    {
+        return false;
+    }
+
+#if SENSOR_ENABLE_ICM42688
+    /* ICM42688 calibration also required when enabled */
+    if (!imu_calib_is_valid(&g_robot_params.imu_icm42688))
+    {
+        return false;
+    }
+#endif
+
+    return true;
 }
 
 bool motion_control_can_arm(void)
@@ -502,4 +524,9 @@ bool motion_control_get_control_output(motion_control_output_t *out)
     out->iq_right = s_last_iq_right;
     out->pitch_target_rad = s_controller.getLastPitchTarget();
     return true;
+}
+
+bool motion_control_is_saturated(void)
+{
+    return s_controller.isOutputSaturated();
 }

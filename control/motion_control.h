@@ -81,6 +81,11 @@ typedef struct
 
 bool motion_control_get_control_output(motion_control_output_t *out);
 
+/**
+ * @brief Check if motor output is currently saturated (hitting IqMax)
+ */
+bool motion_control_is_saturated(void);
+
 #ifdef __cplusplus
 }
 #endif

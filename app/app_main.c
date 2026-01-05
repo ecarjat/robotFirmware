@@ -19,6 +19,7 @@
 #include "sensors.h"
 #include "config_control.h"
 #include "control_timer.h"
+#include "led_status.h"
 #if SENSOR_ENABLE_BMI270
 #include "imu_bmi270.h"
 #endif
@@ -172,9 +173,6 @@ static uint8_t s_estop_active = 0U;
 static uint8_t s_last_teleop_flags = 0U;
 static uint8_t s_last_imu_active = 0xFFU;
 static uint8_t s_last_imu_active_valid = 0U;
-static uint32_t s_imu_seq = 0U;
-static uint32_t s_bmi_seq = 0U;
-static uint32_t s_bmm_seq = 0U;
 static volatile uint32_t s_link_decode_failures = 0U;
 static volatile uint32_t s_link_decode_last_len = 0U;
 static volatile uint32_t s_link_overflows = 0U;
@@ -186,16 +184,15 @@ static volatile app_link_send_err_t s_link_send_last_err = APP_LINK_SEND_OK;
 static volatile uint32_t s_link_send_last_status = 0U;
 static volatile uint32_t s_link_send_last_hal_state = 0U;
 static volatile uint32_t s_link_send_last_hal_err = 0U;
+static uint32_t s_telem_fail_count = 0U;
+#define TELEM_FAIL_THRESHOLD 3U  /* Consecutive failures before LED indication */
 
 /* Global robot parameters (loaded from flash at startup) */
 robot_params_t g_robot_params;
 
 static void app_init(void) {
   WDOG_CHECKPOINT(WDOG_CP_APP_INIT_START);
-  // for(int i=0; i <10 ; i++){
   HAL_Delay(2000);
-  // WDOG_CHECKPOINT(WDOG_CP_APP_INIT_START);
-  // }
 
   /* Load robot parameters from flash (or use defaults) */
   param_storage_init();
@@ -310,6 +307,9 @@ static void app_init(void) {
   /* Initialize and start control timer for 1ms control loop */
   control_timer_init();
   control_timer_start();
+
+  /* Initialize LED status state machine */
+  led_status_init();
 }
 
 static void app_idle_tick(void) {
@@ -335,14 +335,7 @@ static void app_idle_tick(void) {
     control_timer_end_cycle();
   }
   imu_sched_tick();
-// #if SENSOR_ENABLE_BMM150
-//   imu_bmm150_poll();
-// #endif
 
-  // if ((now - s_last_cmd_ms) > APP_HEARTBEAT_TIMEOUT_MS) {
-  //   APP_LOG_ERROR("Link heartbeat timeout");
-  //   s_last_cmd_ms = now; // rate-limit log spam
-  // }
   if ((now - s_last_log_ms) >= APP_LOG_PERIOD_MS) {
     s_last_log_ms = now;
     app_log_sensors();
@@ -410,7 +403,40 @@ static void app_idle_tick(void) {
 
   if ((now - s_last_led_ms) >= APP_IDLE_TICK_MS) {
     s_last_led_ms = now;
-    HAL_GPIO_TogglePin(LED_GREEN_GPIO_Port, LED_GREEN_Pin);
+
+    /* Update LED status flags based on system state */
+    motion_mode_t mode = motion_control_get_mode();
+
+    /* Fault/Fallen flags */
+    if (mode == MOTION_MODE_FAULT) {
+      led_status_set_flag(LED_STATUS_FAULT);
+    } else {
+      led_status_clear_flag(LED_STATUS_FAULT);
+    }
+
+    if (mode == MOTION_MODE_FALLEN) {
+      led_status_set_flag(LED_STATUS_FALLEN);
+    } else {
+      led_status_clear_flag(LED_STATUS_FALLEN);
+    }
+
+    /* Motor timeout flag */
+    uint32_t last_motor_ok = motion_control_get_last_motor_ok_ms();
+    if (last_motor_ok != 0U && (now - last_motor_ok) > MOTOR_LINK_FAULT_FATAL_MS) {
+      led_status_set_flag(LED_STATUS_MOTOR_TIMEOUT);
+    } else {
+      led_status_clear_flag(LED_STATUS_MOTOR_TIMEOUT);
+    }
+
+    /* Motor saturation flag (only relevant when balancing) */
+    if (mode == MOTION_MODE_BALANCING && motion_control_is_saturated()) {
+      led_status_set_flag(LED_STATUS_MOTOR_SATURATED);
+    } else {
+      led_status_clear_flag(LED_STATUS_MOTOR_SATURATED);
+    }
+
+    /* Update LED outputs */
+    led_status_update(now);
   }
 }
 
@@ -420,39 +446,19 @@ static bool app_in_isr(void) {
 
 #if SENSOR_ENABLE_BMI270
 static void app_log_bmi270(void) {
-  // imu_bmi270_sample_t sample;
-  // if (imu_bmi270_try_get_latest(&sample, &s_bmi_seq)) {
-  //   APP_LOG_INFO("BMI270 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
-  //                "%ld temp=%ld",
-  //                (long)sample.accel[0], (long)sample.accel[1],
-  //                (long)sample.accel[2], (long)sample.gyro[0],
-  //                (long)sample.gyro[1], (long)sample.gyro[2],
-  //                (long)sample.temperature);
-  // }
+  /* IMU data now logged via motion_control EKF telemetry */
 }
 #endif
 
 #if SENSOR_ENABLE_ICM42688
 static void app_log_icm42688(void) {
-  // imu_icm42688_sample_t sample;
-  // if (imu_icm42688_try_get_latest(&sample, &s_imu_seq)) {
-  //   APP_LOG_INFO("ICM42688 accel [mg] = %ld, %ld, %ld gyro [mdps] = %ld,%ld, "
-  //                "%ld temp=%ld",
-  //                (long)sample.accel[0], (long)sample.accel[1],
-  //                (long)sample.accel[2], (long)sample.gyro[0],
-  //                (long)sample.gyro[1], (long)sample.gyro[2],
-  //                (long)sample.temperature);
-  // }
+  /* IMU data now logged via motion_control EKF telemetry */
 }
 #endif
 
 #if SENSOR_ENABLE_BMM150
 static void app_log_bmm150(void) {
-  // imu_bmm150_sample_t sample;
-  // if (imu_bmm150_try_get_latest(&sample, &s_bmm_seq)) {
-  //   APP_LOG_INFO("BMM150 mag [uT] = %ld, %ld, %ld", (long)sample.mag[0],
-  //                (long)sample.mag[1], (long)sample.mag[2]);
-  // }
+  /* Magnetometer logging not currently used */
 }
 #endif
 
@@ -1405,7 +1411,7 @@ static void app_cmd_handler(uint8_t msg_type, const uint8_t *payload,
     APP_LOG_INFO("Teleop fwd=%.2f turn=%.2f flags=0x%04x", (double)cmd->vx_mps,
                  (double)cmd->wz_radps, cmd->flags);
   } else if (msg_type == ROBOT_MSG_CMD_HEARTBEAT) {
-    // APP_LOG_INFO("Heartbeat received");
+    /* Heartbeat handled silently - logging would spam */
   } else if (msg_type == ROBOT_MSG_CMD_ARM) {
     APP_LOG_INFO("Arm requested");
     if (!motion_control_can_arm()) {
@@ -1670,6 +1676,10 @@ static void app_send_telem(void) {
 
   if (!app_link_send(ROBOT_MSG_TELEM_FRAME_V2, 0U, (const uint8_t *)&telem,
                      sizeof(telem), 0U)) {
+    s_telem_fail_count++;
+    if (s_telem_fail_count >= TELEM_FAIL_THRESHOLD) {
+      led_status_set_flag(LED_STATUS_TELEM_FAILURE);
+    }
     unsigned long cts = (unsigned long)(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET);
     unsigned long rts = (unsigned long)(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1) == GPIO_PIN_SET);
     APP_LOG_ERROR("Failed to send telem frame reason=%s cts=%lu rts=%lu status=0x%lx state=0x%lx err=0x%lx",
@@ -1679,5 +1689,11 @@ static void app_send_telem(void) {
                   (unsigned long)s_link_send_last_status,
                   (unsigned long)s_link_send_last_hal_state,
                   (unsigned long)s_link_send_last_hal_err);
+  } else {
+    /* Success: clear failure counter and LED flag */
+    if (s_telem_fail_count > 0U) {
+      s_telem_fail_count = 0U;
+      led_status_clear_flag(LED_STATUS_TELEM_FAILURE);
+    }
   }
 }

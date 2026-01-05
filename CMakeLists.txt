@@ -72,6 +72,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     drivers/system_reboot.c
     drivers/spi_bus.c
     drivers/debug_wdog.c
+    drivers/led_status.c
     libs/BMI270_SensorAPI/bmi2.c
     libs/BMI270_SensorAPI/bmi270.c
     libs/BMM150_SensorAPI/bmm150.c

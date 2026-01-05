@@ -184,6 +184,7 @@ void StateEstimator::update(const ImuReading &primary, const ImuReading &seconda
         w->samples[w->index] = delta;
         w->index = (w->index + 1U) % IMU_VIB_WINDOW_SAMPLES;
         w->sum_sq += (delta * delta) - (old * old);
+        if (w->sum_sq < 0.0f) w->sum_sq = 0.0f;  /* Guard against FP rounding errors */
         w->rms = (w->count > 0U) ? sqrtf(w->sum_sq / (float)w->count) : 0.0f;
     }
 
@@ -198,6 +199,7 @@ void StateEstimator::update(const ImuReading &primary, const ImuReading &seconda
         w->samples[w->index] = delta;
         w->index = (w->index + 1U) % IMU_VIB_WINDOW_SAMPLES;
         w->sum_sq += (delta * delta) - (old * old);
+        if (w->sum_sq < 0.0f) w->sum_sq = 0.0f;  /* Guard against FP rounding errors */
         w->rms = (w->count > 0U) ? sqrtf(w->sum_sq / (float)w->count) : 0.0f;
     }
 

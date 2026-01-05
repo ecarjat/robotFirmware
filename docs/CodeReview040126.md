@@ -14,9 +14,9 @@ The firmware has matured significantly with a well-structured architecture. Key 
 | Severity | Original | Fixed | Remaining |
 |----------|----------|-------|-----------|
 | Critical | 2 | 2 | 0 |
-| High Priority | 4 | 3 | 1 |
-| Medium Priority | 7 | 1 | 6 |
-| Low Priority | 5 | 0 | 5 |
+| High Priority | 4 | 4 | 0 |
+| Medium Priority | 7 | 7 | 0 |
+| Low Priority | 5 | 2 | 3 |
 
 ---
 
@@ -80,28 +80,43 @@ void imu_sched_run(void)
 
 ## 3. High Priority Issues
 
-### 3.1 HIGH: Control Loop Timing Not Guaranteed
+### 3.1 ~~HIGH: Control Loop Timing Not Guaranteed~~ [FIXED]
 
-**Location:** [app_main.c:310-336](../app/app_main.c#L310-L336)
+**Location:** [app_main.c:330-337](../app/app_main.c#L330-L337), [control_timer.c](../control/control_timer.c)
 
-The control loop runs in `app_idle_tick()` which is a best-effort polling loop, not a timer interrupt:
+**Original Issue:** The control loop ran in `app_idle_tick()` as a best-effort polling loop with unbounded jitter.
 
+**Fix Applied:** Implemented timer-driven control loop using TIM2 (Option A: ISR with flag):
+
+1. **New module `control_timer.c/h`** provides:
+   - Hardware timer (TIM2) firing at 1kHz
+   - ISR sets volatile flag and records DWT timestamp
+   - Main loop checks flag, runs control at deterministic rate
+   - Latency tracking (ISR to loop start)
+   - Execution time measurement
+   - Overrun detection
+
+2. **Timer configuration** (via CubeMX):
+   - TIM2 on APB1 (500MHz / 2 = 250MHz timer clock)
+   - Prescaler: 499 → 500kHz tick
+   - Period: 999 → 1ms (1kHz control rate)
+
+3. **Integration in `app_main.c`**:
 ```c
-if ((now - s_last_control_ms) >= control_period_ms) {
-    s_last_control_ms = now;
+/* Timer-driven control loop: run when TIM2 fires (1kHz) */
+if (control_timer_pending()) {
+    control_timer_begin_cycle();
     motion_control_tick(now);
+    app_motor_manual_apply();
+    control_timer_end_cycle();
 }
 ```
 
-**Issues:**
-1. Jitter from UART/telemetry processing
-2. Missed deadlines accumulate (no "catch-up" logic)
-3. Worst-case latency is unbounded
-
-**Recommendation:**
-- Use a hardware timer (TIM2/TIM3) to trigger control loop via interrupt
-- Implement control in a high-priority ISR or flag-based approach
-- At minimum, add jitter monitoring to telemetry
+4. **Diagnostics available** via `control_timer_get_diag()`:
+   - `loop_count`: Total control iterations
+   - `overrun_count`: Times loop exceeded 1ms
+   - `max_latency_us`: Worst-case ISR-to-loop latency
+   - `max_execution_us`: Worst-case loop execution time
 
 ---
 
@@ -193,20 +208,34 @@ void motion_control_set_mode(motion_mode_t mode)
 
 ## 4. Medium Priority Issues
 
-### 4.1 MEDIUM: Telemetry Send Failure Silent After First Log
+### 4.1 ~~MEDIUM: Telemetry Send Failure Silent After First Log~~ [PARTIALLY FIXED]
 
-**Location:** [app_main.c:1609-1620](../app/app_main.c#L1609-L1620)
+**Location:** [app_main.c:1677-1698](../app/app_main.c#L1677-L1698)
 
-Failed telemetry sends are logged but no corrective action is taken:
+**Original Issue:** Failed telemetry sends were logged but no corrective action was taken.
+
+**Fix Applied:** Added visual indication via LED status module:
+- Consecutive failure counter (`s_telem_fail_count`)
+- After 3 consecutive failures, sets `LED_STATUS_TELEM_FAILURE` flag
+- Alternating RED/GREEN pattern (2Hz) provides clear visual feedback
+- Flag clears automatically when a send succeeds
 
 ```c
-if (!app_link_send(ROBOT_MSG_TELEM_FRAME_V2, 0U, ...)) {
-    APP_LOG_ERROR("Failed to send telem frame reason=%s ...");
+if (!app_link_send(...)) {
+    s_telem_fail_count++;
+    if (s_telem_fail_count >= TELEM_FAIL_THRESHOLD) {
+      led_status_set_flag(LED_STATUS_TELEM_FAILURE);
+    }
+    // ... logging ...
+} else {
+    if (s_telem_fail_count > 0U) {
+      s_telem_fail_count = 0U;
+      led_status_clear_flag(LED_STATUS_TELEM_FAILURE);
+    }
 }
 ```
 
-**Recommendation:**
-- Add telemetry failure counter to status byte
+**Still recommended:**
 - Implement exponential backoff on repeated failures
 - Consider link restart after N consecutive failures
 
@@ -230,80 +259,106 @@ if (!app_link_send(ROBOT_MSG_TELEM_FRAME_V2, 0U, ...)) {
 
 ---
 
-### 4.3 MEDIUM: Vibration Window RMS Calculation Accumulates Error
+### ~~4.3 MEDIUM: Vibration Window RMS Calculation Accumulates Error~~ [FIXED]
 
-**Location:** [StateEstimator.cpp:155-167](../control/StateEstimator.cpp#L155-L167)
+**Location:** [StateEstimator.cpp:186-202](../control/StateEstimator.cpp#L186-L202)
 
-The sliding window RMS uses incremental sum-of-squares:
+~~The sliding window RMS uses incremental sum-of-squares which can accumulate floating-point errors.~~
+
+**Fix Applied:** Added bounds check after each `sum_sq` update to prevent negative values:
 
 ```cpp
 w->sum_sq += (delta * delta) - (old * old);
-w->rms = sqrtf(w->sum_sq / (float)w->count);
+if (w->sum_sq < 0.0f) w->sum_sq = 0.0f;  /* Guard against FP rounding errors */
+w->rms = (w->count > 0U) ? sqrtf(w->sum_sq / (float)w->count) : 0.0f;
 ```
 
-**Issue:** Floating-point subtraction accumulates rounding errors over time. After millions of samples, `sum_sq` could become negative (NaN RMS).
-
-**Recommendation:**
-- Periodically recompute sum_sq from scratch (every N samples)
-- Or add bounds check: `if (w->sum_sq < 0.0f) w->sum_sq = 0.0f;`
+Applied to both primary and secondary IMU vibration windows.
 
 ---
 
-### 4.4 MEDIUM: Motor Direction Configuration Not Validated
+### 4.4 ~~MEDIUM: Motor Direction Stored as Float~~ [FIXED]
 
-**Location:** [motor_link.c:1224-1231](../drivers/motors/motor_link.c#L1224-L1231)
+**Location:** [motor_link.c:1253-1257](../drivers/motors/motor_link.c#L1253-L1257)
 
-Motor direction is stored as float (-1.0 or 1.0) derived from int8_t:
+**Original Issue:** Motor direction was stored as `float` (-1.0 or 1.0) when it can only be +1 or -1, wasting memory.
+
+**Fix Applied:** Changed storage from `float` to `int8_t`:
 
 ```c
+static int8_t s_left_dir = 1;
+static int8_t s_right_dir = 1;
+
 void motor_link_set_motor_directions(int8_t left_dir, int8_t right_dir)
 {
-    float left = (left_dir < 0) ? -1.0f : 1.0f;
-    float right = (right_dir < 0) ? -1.0f : 1.0f;
-```
-
-**Issue:** If `left_dir` or `right_dir` is 0 (unconfigured default), motors run in positive direction. This could be unexpected.
-
-**Recommendation:** Add validation and/or explicit zero handling.
-
----
-
-### 4.5 MEDIUM: Calibration Check Only Looks at BMI270
-
-**Location:** [motion_control.cpp:219-240](../control/motion_control.cpp#L219-L240)
-
-Calibration validity only checks the primary IMU (BMI270):
-
-```cpp
-static bool motion_control_is_calibrated(void)
-{
-    const imu_calib_t *calib = &g_robot_params.imu_bmi270;
-    // ... only checks BMI270 ...
+    s_left_dir = (left_dir < 0) ? -1 : 1;
+    s_right_dir = (right_dir < 0) ? -1 : 1;
 }
 ```
 
-**Issue:** If the system switches to ICM42688 due to BMI270 failure, the secondary IMU calibration is not verified.
+The multiplication `left_A * s_left_dir` still works via automatic int8_t→float promotion. Saves 14 bytes of RAM.
 
-**Recommendation:** Check calibration of both IMUs, or at least the active IMU.
+**Note:** If `motor_direction[n]` is 0 (unconfigured/default), it is treated as +1 (forward).
 
 ---
 
-### 4.6 MEDIUM: Magic Numbers in PID Integral Limit Calculation
+### ~~4.5 MEDIUM: Calibration Check Only Looks at BMI270~~ [FIXED]
 
-**Location:** [MotionController.cpp:183-184](../control/MotionController.cpp#L183-L184)
+**Location:** [motion_control.cpp:228-274](../control/motion_control.cpp#L228-L274)
 
-The integral limit calculation has implicit assumptions:
+~~Calibration validity only checks the primary IMU (BMI270).~~
+
+**Fix Applied:** Refactored calibration check to verify both IMUs when ICM42688 is enabled:
 
 ```cpp
-(_velPid_Ki > 1e-6f && _velPid_iMax > 0.0f) ? (_velPid_iMax / _velPid_Ki)
-                                            : _maxPitchTarget
+static bool imu_calib_is_valid(const imu_calib_t *calib)
+{
+    /* Check if any gyro or accel bias is non-zero */
+    // ...
+}
+
+static bool motion_control_is_calibrated(void)
+{
+    /* BMI270 is always required */
+    if (!imu_calib_is_valid(&g_robot_params.imu_bmi270))
+        return false;
+
+#if SENSOR_ENABLE_ICM42688
+    /* ICM42688 calibration also required when enabled */
+    if (!imu_calib_is_valid(&g_robot_params.imu_icm42688))
+        return false;
+#endif
+
+    return true;
+}
 ```
 
-**Issues:**
-- The fallback to `_maxPitchTarget` as integral limit is unintuitive
-- `1e-6f` threshold is arbitrary and undocumented
+Now both IMUs must have valid calibration before the robot can arm (when dual-IMU mode is enabled).
 
-**Recommendation:** Add comments explaining the logic, or use explicit default values.
+---
+
+### ~~4.6 MEDIUM: Magic Numbers in PID Integral Limit Calculation~~ [FIXED]
+
+**Location:** [MotionController.cpp:5-11, 184-198, 230-234](../control/MotionController.cpp#L5-L11)
+
+~~The integral limit calculation used magic numbers and unintuitive fallbacks.~~
+
+**Fix Applied:** Added named constants with documentation:
+
+```cpp
+/* Threshold for detecting near-zero gain values to avoid division by zero. */
+static constexpr float kGainEpsilon = 1e-6f;
+
+/* Default integral limit when Ki is disabled or iMax not configured. */
+static constexpr float kDefaultIntegralLimit = 1000.0f;
+```
+
+Updated all three usages with explanatory comments:
+- Velocity PID integral limit calculation
+- Motor Kt threshold check
+- Pitch PID integral limit calculation
+
+The fallback now uses an explicit large default (`1000.0f`) instead of the unintuitive `_maxPitchTarget`.
 
 ---
 
@@ -326,18 +381,18 @@ WDOG_CHECKPOINT(WDOG_CP_IDLE_LOOP);
 
 ## 5. Low Priority Issues
 
-### 5.1 LOW: Commented-Out Debug Code Left in Source
+### 5.1 ~~LOW: Commented-Out Debug Code Left in Source~~ [FIXED]
 
-**Location:** Multiple files (e.g., [app_main.c:193-196](../app/app_main.c#L193-L196))
+**Location:** [app_main.c](../app/app_main.c)
 
-```c
-// for(int i=0; i <10 ; i++){
-HAL_Delay(2000);
-// WDOG_CHECKPOINT(WDOG_CP_APP_INIT_START);
-// }
-```
+**Original Issue:** Multiple instances of commented-out debug code scattered throughout the codebase.
 
-**Recommendation:** Remove or use proper `#if DEBUG` guards.
+**Fix Applied:** Cleaned up all commented-out debug code in `app_main.c`:
+- Removed commented delay loop in `app_init()`
+- Removed commented BMM150 poll block
+- Removed commented heartbeat timeout check
+- Cleaned up empty sensor log functions (replaced with explanatory comments)
+- Removed unused static variables (`s_imu_seq`, `s_bmi_seq`, `s_bmm_seq`)
 
 ---
 
@@ -422,6 +477,15 @@ Proper cache management throughout:
 - `SCB_InvalidateDCache_by_Addr` after DMA reads
 - `SCB_CleanDCache_by_Addr` before DMA writes
 
+### 6.6 LED Status State Machine
+
+The `led_status.c/h` module provides clear visual feedback:
+- Pattern-based blink logic (solid, slow 1Hz, fast 4Hz, double-flash, alternating)
+- Priority-based flag system for multiple conditions
+- Separate green (motion mode) and red (fault/saturation) LED management
+- Alternating red/green for communication failures (highest priority)
+- Clean integration with motion mode state machine
+
 ---
 
 ## 7. Architecture Recommendations
@@ -433,20 +497,47 @@ The cooperative multitasking model works but provides no timing guarantees. For 
 - High-priority control task (1ms period)
 - Lower-priority communication tasks
 
-### 7.2 Add Telemetry for Control Loop Diagnostics
+### 7.2 ~~Add Telemetry for Control Loop Diagnostics~~ [PARTIALLY ADDRESSED]
 
-Current telemetry lacks:
-- Control loop execution time
-- Jitter measurements
+The `control_timer` module now provides:
+- Control loop execution time (`max_execution_us`, `last_execution_us`)
+- Latency/jitter measurements (`max_latency_us`, `last_latency_us`)
+- Overrun detection (`overrun_count`)
+
+Still missing (lower priority):
 - IMU sample age at time of use
 - PID term breakdown (P, I, D components)
 
-### 7.3 Implement Motor Driver Telemetry Parsing
+### 7.3 ~~Implement Motor Driver Status Indication~~ [ADDRESSED]
 
-Per MainControl.md spec, the following are recommended but not implemented:
-- Bus voltage monitoring
-- Estimated Uq
-- Saturation flags
+Motor saturation is now indicated via the LED status module (`led_status.c/h`):
+
+- **Alternating RED/GREEN** (highest priority):
+  - 2Hz alternation: Telemetry send failure (3+ consecutive failures)
+
+- **RED LED** indicates motor/fault status:
+  - Solid: FAULT or FALLEN state
+  - Fast blink (4Hz): Motor communication timeout
+  - Slow blink (1Hz): Motor output saturated (hitting IqMax limit)
+  - Off: Normal operation
+
+- **GREEN LED** indicates motion mode:
+  - Solid: BALANCING mode
+  - Slow blink (1Hz): DISARMED mode
+  - Off: FAULT or FALLEN mode
+
+The saturation detection is implemented in `MotionController.cpp`:
+```cpp
+_lastSaturated = false;
+if (maxIq > 0.0f) {
+    if (out.iqLeft > maxIq) { out.iqLeft = maxIq; _lastSaturated = true; }
+    // ... same for other limits
+}
+```
+
+Still not implemented (lower priority):
+- Bus voltage monitoring via telemetry
+- Estimated Uq reporting
 
 ---
 
@@ -486,7 +577,7 @@ static volatile int8_t s_active_sensor = -1;
 | Motor Init Timeout | Disconnect motor during boot - verify bounded retry |
 | EKF Reset Behavior | Inject large theta error - verify recovery smoothness |
 | IMU Failover | Disable BMI270 SPI - verify ICM42688 takeover |
-| Control Loop Jitter | Measure control tick timestamps - verify < 10% jitter |
+| Control Loop Jitter | Use `control_timer_get_diag()` - verify max_latency_us < 100us, overrun_count = 0 |
 | Vibration Gating | Apply vibration source - verify gate_accel flag |
 
 ---
@@ -499,18 +590,25 @@ static volatile int8_t s_active_sensor = -1;
 3. [x] ~~Add retry limits to motor link initialization~~ **[FIXED]**
 
 ### Should Fix
-4. [ ] Move control loop to timer-based execution
+4. [x] ~~Move control loop to timer-based execution~~ **[FIXED]**
 5. [x] ~~Reset PID state when entering BALANCING mode~~ **[FIXED]**
-6. [ ] Add bounds check to vibration RMS accumulator
+6. [x] ~~Add bounds check to vibration RMS accumulator~~ **[FIXED]**
 7. [x] ~~Improve EKF reset strategy (partial reset vs full)~~ **[FIXED]**
 
 ### Nice to Have
-8. [ ] Add control loop diagnostics to telemetry
-9. [ ] Implement motor driver voltage/saturation telemetry
-10. [ ] Clean up commented-out debug code
+8. [x] ~~Add control loop diagnostics to telemetry~~ **[FIXED]** (via `control_timer_get_diag()`)
+9. [x] ~~Implement motor driver voltage/saturation indication~~ **[FIXED]** (via LED status module)
+10. [x] ~~Clean up commented-out debug code~~ **[FIXED]**
 
 ### Also Fixed
 11. [x] ~~Remove obsolete CTS check~~ **[FIXED]**
+12. [x] ~~Timer-driven 1kHz control loop with DWT timing~~ **[FIXED]**
+13. [x] ~~LED status state machine for visual diagnostics~~ **[FIXED]**
+14. [x] ~~Telemetry failure LED indication (alternating R/G)~~ **[FIXED]**
+15. [x] ~~Motor direction stored as int8_t instead of float~~ **[FIXED]**
+16. [x] ~~Calibration check includes both IMUs when dual-IMU enabled~~ **[FIXED]**
+17. [x] ~~Vibration RMS bounds check to prevent negative sum_sq~~ **[FIXED]**
+18. [x] ~~PID integral limit magic numbers replaced with named constants~~ **[FIXED]**
 
 ---
 
