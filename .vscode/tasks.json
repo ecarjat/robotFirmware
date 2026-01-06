@@ -25,6 +25,40 @@
 			"detail": "Build then erase/write/verify/boot via kvbl upload"
 		},
 		{
+			"label": "CMake: reboot and upload",
+			"type": "shell",
+			"command": "poetry",
+			"args": [
+				"run",
+				"python",
+				"host/kvbl_tool.py",
+				"--port",
+				"${input:kvblPort}",
+				"reboot-bootloader",
+				"&&",
+				"sleep",
+				"1",
+				"&&",
+				"poetry",
+				"run",
+				"python",
+				"host/kvbl_tool.py",
+				"--port",
+				"${input:kvblPort}",
+				"upload",
+				"${workspaceFolder}/build/Debug/stm32Controller.bin"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/../bootloader"
+			},
+			"group": "build",
+			"problemMatcher": [],
+			"dependsOn": [
+				"CMake: build"
+			],
+			"detail": "Build then erase/write/verify/boot via kvbl upload"
+		},
+		{
 			"type": "cmake",
 			"label": "CMake: build",
 			"command": "build",

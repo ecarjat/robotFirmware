@@ -72,6 +72,8 @@ static void app_link_dispatch(const robot_frame_t *frame);
 static void app_rpc_handle(const robot_frame_t *frame);
 static void app_cmd_handler(uint8_t msg_type, const uint8_t *payload,
                             size_t len, void *ctx);
+void app_cdc_handle_frame(const uint8_t *data, uint32_t len);
+static volatile uint8_t s_reboot_request = 0U; /* 0=none, 1=normal, 2=bootloader */
 static void app_link_poll(void);
 static void app_link_restart_rx(void);
 static bool app_link_send(uint8_t type, uint16_t flags, const uint8_t *payload,
@@ -326,6 +328,18 @@ static void app_idle_tick(void) {
     app_send_telem();
     s_last_telem_ms = now;
   }
+
+  if (s_reboot_request != 0U) {
+    uint8_t mode = s_reboot_request;
+    s_reboot_request = 0U;
+    APP_LOG_INFO("Reboot requested (mode=%u)", (unsigned int)mode);
+    app_log_flush_blocking(2000U);
+    if (mode == 1U) {
+      system_reboot_to_bootloader();
+    } else {
+      system_reboot();
+    }
+  }
 #ifdef ENABLE_MOTORS
   motor_link_poll();
 #endif
@@ -337,8 +351,8 @@ static void app_idle_tick(void) {
     motor_link_enable(false);
 #endif
     led_status_set_flag(LED_STATUS_TELEM_FAILURE);
-    APP_LOG_ERROR("Link timeout: no frames for %lu ms",
-                  (unsigned long)(now - s_last_cmd_ms));
+    // APP_LOG_ERROR("Link timeout: no frames for %lu ms",
+    //               (unsigned long)(now - s_last_cmd_ms));
   }
 
   /* Timer-driven control loop: run when TIM2 fires (control_rate_hz) */
@@ -630,6 +644,15 @@ static void app_link_handle_encoded_frame(const uint8_t *frame, size_t len) {
   }
 
   app_link_dispatch(&decoded);
+}
+
+void app_cdc_handle_frame(const uint8_t *data, uint32_t len) {
+  if (data == NULL || len == 0U) {
+    return;
+  }
+  /* CDC frames share the link decoder with UART frames. */
+  /* Reuse the UART COBS accumulator so partial CDC packets are handled. */
+  app_link_process_chunk(data, len);
 }
 
 static void app_link_log_bytes(const char *label, const uint8_t *data,
@@ -1444,8 +1467,8 @@ static void app_cmd_handler(uint8_t msg_type, const uint8_t *payload,
       }
       motion_control_set_teleop(cmd->vx_mps, cmd->wz_radps);
     }
-    APP_LOG_INFO("Teleop fwd=%.2f turn=%.2f flags=0x%04x", (double)cmd->vx_mps,
-                 (double)cmd->wz_radps, cmd->flags);
+    // APP_LOG_INFO("Teleop fwd=%.2f turn=%.2f flags=0x%04x", (double)cmd->vx_mps,
+    //              (double)cmd->wz_radps, cmd->flags);
   } else if (msg_type == ROBOT_MSG_CMD_HEARTBEAT) {
     /* Heartbeat handled silently - logging would spam */
   } else if (msg_type == ROBOT_MSG_CMD_ARM) {
@@ -1462,15 +1485,8 @@ static void app_cmd_handler(uint8_t msg_type, const uint8_t *payload,
 #endif
   } else if (msg_type == ROBOT_MSG_CMD_REBOOT) {
     uint8_t mode = (len > 0U) ? payload[0] : 0U;
-    if (mode == 1U) {
-      APP_LOG_INFO("Reboot to bootloader requested");
-      HAL_Delay(50U); /* Allow log/response to flush */
-      system_reboot_to_bootloader();
-    } else {
-      APP_LOG_INFO("Normal reboot requested");
-      HAL_Delay(50U);
-      system_reboot();
-    }
+    /* mode: 0=normal, 1=bootloader */
+    s_reboot_request = (mode == 1U) ? 1U : 0U; /* 1 = bootloader, 0 = normal */
   } else {
     APP_LOG_INFO("CMD handler invoked, msg_type=0x%02x", msg_type);
   }

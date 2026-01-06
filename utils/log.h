@@ -9,6 +9,7 @@ extern "C" {
 
 void app_log_printf(const char *fmt, ...);
 void app_log_usb_tx_complete(uint16_t len);
+void app_log_flush_blocking(uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

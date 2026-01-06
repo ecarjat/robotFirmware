@@ -12,7 +12,6 @@ void system_reboot_to_bootloader(void)
     __disable_irq();
 
     /* Enable access to RTC backup registers */
-    // __HAL_RCC_PWR_CLK_ENABLE();
     HAL_PWR_EnableBkUpAccess();
 
     /* Write magic value to backup register 0 */

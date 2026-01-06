@@ -59,6 +59,28 @@ static uint16_t app_log_ring_free(uint16_t head, uint16_t tail)
     return (uint16_t)((APP_LOG_RING_BYTES - 1U) - used);
 }
 
+void app_log_flush_blocking(uint32_t timeout_ms)
+{
+    uint32_t start = HAL_GetTick();
+    while (1)
+    {
+        app_log_usb_kick();
+        __disable_irq();
+        uint16_t head = s_log_head;
+        uint16_t tail = s_log_tail;
+        uint8_t busy = s_log_tx_busy;
+        __enable_irq();
+        if (!busy && head == tail)
+        {
+            return;
+        }
+        if ((HAL_GetTick() - start) > timeout_ms)
+        {
+            return;
+        }
+    }
+}
+
 static uint16_t app_log_ring_write(const uint8_t *data, uint16_t len)
 {
     if (data == NULL || len == 0U)

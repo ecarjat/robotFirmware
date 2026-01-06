@@ -7,3 +7,7 @@ common
 legacy
 build/
 .serena/logs
+.claude/settings.local.json
+.serena/memories/build-commands.md
+.vscode/launch.json
+.serena/serena_config.yml
