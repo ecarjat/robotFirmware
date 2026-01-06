@@ -84,6 +84,8 @@ static void app_log_sensors(void);
 static void app_log_link_errors(void);
 static void app_motor_manual_apply(void);
 static uint8_t app_motor_manual_enable(bool enable);
+
+static bool app_try_arm_balancing(bool prepare_balance);
 static uint8_t app_motor_manual_run(uint8_t side, float intensity);
 static bool app_rpc_send_param_resp(uint8_t method,
                                     uint8_t status,
@@ -335,6 +337,8 @@ static void app_idle_tick(void) {
     motor_link_enable(false);
 #endif
     led_status_set_flag(LED_STATUS_TELEM_FAILURE);
+    APP_LOG_ERROR("Link timeout: no frames for %lu ms",
+                  (unsigned long)(now - s_last_cmd_ms));
   }
 
   /* Timer-driven control loop: run when TIM2 fires (control_rate_hz) */
@@ -752,10 +756,9 @@ static void app_link_dispatch(const robot_frame_t *frame) {
     return;
   }
 
-  /* Track link liveness on CMD heartbeats */
-  if (frame->hdr.type == ROBOT_MSG_CMD_HEARTBEAT) {
-    s_last_cmd_ms = HAL_GetTick();
-  }
+  /* Any valid frame counts as link liveness. */
+  s_last_cmd_ms = HAL_GetTick();
+  led_status_clear_flag(LED_STATUS_TELEM_FAILURE);
 
   if (frame->hdr.type == ROBOT_MSG_RPC_REQ) {
     app_rpc_handle(frame);
@@ -879,6 +882,33 @@ static uint8_t app_motor_manual_enable(bool enable) {
   (void)enable;
   return ROBOT_RPC_STATUS_NOT_READY;
 #endif
+}
+
+static bool app_try_arm_balancing(bool prepare_balance) {
+  if (!motion_control_can_arm()) {
+    return false;
+  }
+
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (!motion_control_can_arm()) {
+    __set_PRIMASK(primask);
+    return false;
+  }
+
+  if (prepare_balance) {
+    s_motor_manual.enabled = 0U;
+    s_motor_manual.left = 0.0f;
+    s_motor_manual.right = 0.0f;
+    motion_control_set_output_enabled(true);
+  }
+
+  motion_control_set_mode(MOTION_MODE_BALANCING);
+#ifdef ENABLE_MOTORS
+  motor_link_enable(true);
+#endif
+  __set_PRIMASK(primask);
+  return true;
 }
 
 static uint8_t app_motor_manual_run(uint8_t side, float intensity) {
@@ -1285,19 +1315,11 @@ static void app_rpc_handle(const robot_frame_t *frame) {
                                 length, NULL, 0U, resp_seq);
         return;
       }
-      if (!motion_control_can_arm()) {
+      if (!app_try_arm_balancing(true)) {
         app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_NOT_READY, 0U, 0U,
                                 NULL, 0U, resp_seq);
         return;
       }
-      s_motor_manual.enabled = 0U;
-      s_motor_manual.left = 0.0f;
-      s_motor_manual.right = 0.0f;
-      motion_control_set_output_enabled(true);
-      motion_control_set_mode(MOTION_MODE_BALANCING);
-#ifdef ENABLE_MOTORS
-      motor_link_enable(true);
-#endif
       app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_OK, 0U, 0U, NULL, 0U,
                               resp_seq);
       return;
@@ -1413,13 +1435,8 @@ static void app_cmd_handler(uint8_t msg_type, const uint8_t *payload,
     } else {
       if (arm_rise) {
         APP_LOG_INFO("Teleop arm requested");
-        if (!motion_control_can_arm()) {
+        if (!app_try_arm_balancing(false)) {
           APP_LOG_ERROR("Arm rejected (not ready)");
-        } else {
-          motion_control_set_mode(MOTION_MODE_BALANCING);
-#ifdef ENABLE_MOTORS
-          motor_link_enable(true);
-#endif
         }
       }
       if (mode_cycle_rise) {
@@ -1433,14 +1450,10 @@ static void app_cmd_handler(uint8_t msg_type, const uint8_t *payload,
     /* Heartbeat handled silently - logging would spam */
   } else if (msg_type == ROBOT_MSG_CMD_ARM) {
     APP_LOG_INFO("Arm requested");
-    if (!motion_control_can_arm()) {
+    if (!app_try_arm_balancing(false)) {
       APP_LOG_ERROR("Arm rejected (not ready)");
       return;
     }
-    motion_control_set_mode(MOTION_MODE_BALANCING);
-#ifdef ENABLE_MOTORS
-    motor_link_enable(true);
-#endif
   } else if (msg_type == ROBOT_MSG_CMD_DISARM) {
     APP_LOG_INFO("Disarm requested");
     motion_control_set_mode(MOTION_MODE_DISARMED);
@@ -1716,6 +1729,7 @@ static void app_send_telem(void) {
     if (s_telem_fail_count > 0U) {
       s_telem_fail_count = 0U;
       led_status_clear_flag(LED_STATUS_TELEM_FAILURE);
+      APP_LOG_INFO("Telem send recovered; clearing telem failure flag");
     }
   }
 }

@@ -105,8 +105,8 @@ Motor communication is defined here and must be preserved:
 - Non-blocking on STM32: UART RX uses DMA circular + IDLE interrupt; parsing in main loop.
 - Sequence numbers for CMD + FILE + RPC messages.
 - Heartbeat mechanism:
-  - ESP32 sends `CMD_HEARTBEAT` at e.g. 10 Hz.
-  - STM32 marks BT/Wi-Fi link stale if no heartbeat > 250 ms (configurable).
+  - ESP32 sends `CMD_HEARTBEAT` only when no other frames are being sent.
+  - STM32 marks BT/Wi-Fi link stale if no frames > 250 ms (configurable).
 
 ---
 
@@ -178,7 +178,7 @@ Motor communication is defined here and must be preserved:
   - turn/yaw command
   - mode buttons (arm/disarm, mode cycle)
   - e-stop/disarm
-- Send CMD at fixed rate (e.g., 100 Hz) + heartbeat.
+- Send CMD at fixed rate (e.g., 100 Hz). Heartbeat only when idle.
 
 ### 7.2 Wi-Fi portal
 Provide HTTP (or WebSocket/SSE) portal, proxying requests to STM32 via UART link.
@@ -295,7 +295,7 @@ ESP32 provides transport only. STM32 owns flashing logic (bootloader or in-app u
 ### Link / transport
 - CRC32 rejects corrupted frames
 - sustained TELEM stream at 50–200 Hz without dropping control loop deadlines
-- CMD heartbeat timeout triggers neutral commands within 250 ms
+- Link timeout (no frames) triggers neutral commands within 250 ms
 
 ### Motor comm
 - 4 motor nodes simultaneously:

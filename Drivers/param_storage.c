@@ -102,6 +102,10 @@ static uint32_t param_get_sector(uint32_t address)
  */
 static int param_erase_sector(void)
 {
+    /*
+     * Risk accepted: flash erase disables interrupts for the full duration of the
+     * erase operation on STM32H7.
+     */
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
 
