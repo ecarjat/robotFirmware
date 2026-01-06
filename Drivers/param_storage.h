@@ -40,7 +40,7 @@ extern "C" {
  */
 
 #define PARAM_MAGIC             0x524F424FUL  /* 'ROBO' */
-#define PARAM_VERSION           4U
+#define PARAM_VERSION           5U
 #define PARAM_FLASH_BASE        0x080C0000UL
 #define PARAM_FLASH_SIZE        0x00020000UL  /* 128 KB */
 #define PARAM_FLASH_END         (PARAM_FLASH_BASE + PARAM_FLASH_SIZE)
@@ -107,7 +107,6 @@ typedef struct {
     /* Wheel geometry */
     float wheel_radius_m;
     float wheel_base_m;
-    float encoder_ticks_per_rev;
 
     /* IMU calibration (two sensors) */
     imu_calib_t imu_bmi270;

@@ -182,6 +182,7 @@ static void spi_bus_finish(int status)
 
     spi_bus_deassert_cs(dev);
     spi_bus_cache_invalidate(rx, len);
+    __DMB();
 
     if (cb != NULL)
     {
@@ -270,6 +271,7 @@ int spi_bus_transfer_dma(spi_bus_device_t *dev,
 
     spi_bus_cache_clean(tx, len);
     spi_bus_cache_clean_invalidate(rx, len);
+    __DMB();
 
     spi_bus_assert_cs(dev);
     HAL_StatusTypeDef st = HAL_SPI_TransmitReceive_DMA(s_bus.hspi,
@@ -279,6 +281,9 @@ int spi_bus_transfer_dma(spi_bus_device_t *dev,
     if (st != HAL_OK)
     {
         spi_bus_deassert_cs(dev);
+
+        /* Atomically release bus to prevent race with DMA callback */
+        __disable_irq();
         s_bus.busy = 0U;
         s_bus.active_dev = NULL;
         s_bus.tx = NULL;
@@ -286,6 +291,8 @@ int spi_bus_transfer_dma(spi_bus_device_t *dev,
         s_bus.len = 0U;
         s_bus.cb = NULL;
         s_bus.cb_ctx = NULL;
+        __enable_irq();
+
         return (st == HAL_BUSY) ? SPI_BUS_BUSY : SPI_BUS_ERR;
     }
 
@@ -405,6 +412,7 @@ void spi_bus_abort(void)
 
     spi_bus_deassert_cs(dev);
     spi_bus_cache_invalidate(rx, len);
+    __DMB();
 
     (void)HAL_SPI_Abort(hspi);
 
