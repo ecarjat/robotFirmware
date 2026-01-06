@@ -6,3 +6,4 @@ esp32
 common
 legacy
 build/
+.serena/logs
