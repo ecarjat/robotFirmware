@@ -40,6 +40,7 @@ static uint32_t s_last_tick_ms = 0U;
 static float s_max_turn_rate = PARAM_MAX_TURN_RATE;
 static uint32_t s_last_imu_ok_ms = 0U;
 static uint32_t s_last_motor_ok_ms = 0U;
+static float s_control_dt = CONTROL_DT;
 
 /* Last control output for telemetry */
 static float s_last_iq_left = 0.0f;
@@ -67,6 +68,13 @@ static void motion_control_update_params(void)
     s_controller.setRobotParams(s_params);
     s_controller.setBalanceGains(g_robot_params.balance);
     s_max_turn_rate = g_robot_params.max_angular_vel_rps;
+    if (g_robot_params.control_rate_hz > 1e-3f) {
+        s_control_dt = 1.0f / g_robot_params.control_rate_hz;
+    } else {
+        s_control_dt = CONTROL_DT;
+    }
+    s_controller.setControlDt(s_control_dt);
+    s_estimator.setControlDt(s_control_dt);
 }
 
 void motion_control_apply_params(void)
@@ -327,7 +335,7 @@ void motion_control_set_teleop(float forward_cmd, float turn_cmd)
 
 void motion_control_tick(uint32_t now_ms)
 {
-    float dt_s = CONTROL_DT;
+    float dt_s = s_control_dt;
     if (s_last_tick_ms != 0U)
     {
         uint32_t delta_ms = now_ms - s_last_tick_ms;

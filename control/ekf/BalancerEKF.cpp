@@ -16,6 +16,7 @@ BalancerEKF::BalancerEKF()
       R_{},
       lastGyroPitch_(0.0f),
       lastDt_(0.0f),
+      fallback_dt_(CONTROL_DT),
       diag_{},
       diag_valid_(false),
       theta_r_base_(0.0f),
@@ -107,11 +108,18 @@ void BalancerEKF::setInitialState(float theta_rad, float pos_m)
     ekf_.x[4] = 0.0f;
 }
 
+void BalancerEKF::setFallbackDt(float dtSeconds)
+{
+    if (dtSeconds > 0.0f) {
+        fallback_dt_ = dtSeconds;
+    }
+}
+
 bool BalancerEKF::step(float thetaAcc, float vEnc, float posEnc, float gyroPitch, float dt,
                        float thetaMeasVar)
 {
     if (dt <= 0.0f) {
-        dt = 0.001f;
+        dt = fallback_dt_;
     }
     if (dt > MAX_DT) {
         dt = MAX_DT;
@@ -158,6 +166,7 @@ bool BalancerEKF::step(float thetaAcc, float vEnc, float posEnc, float gyroPitch
     H[1 * EKF_N + 3] = 1.0f;
     H[2 * EKF_N + 2] = 1.0f;
 
+    bool theta_valid = isfinite(thetaAcc);
     bool vel_valid = isfinite(vEnc);
     bool pos_valid = isfinite(posEnc);
 
@@ -168,6 +177,12 @@ bool BalancerEKF::step(float thetaAcc, float vEnc, float posEnc, float gyroPitch
 
     // If a measurement is invalid (NaN), replace it with the predicted value and
     // zero the corresponding H row so the update truly skips that channel.
+    if (!theta_valid) {
+        z[0] = hx[0];
+        for (int i = 0; i < EKF_N; ++i) {
+            H[0 * EKF_N + i] = 0.0f;
+        }
+    }
     if (!vel_valid) {
         z[1] = hx[1];
         for (int i = 0; i < EKF_N; ++i) {
@@ -194,7 +209,8 @@ bool BalancerEKF::step(float thetaAcc, float vEnc, float posEnc, float gyroPitch
     // For theta errors, use gating (inflate R) instead of hard reset
     if (bad_pos || bad_vel) {
         float pos_reset = pos_valid ? posEnc : pos;
-        partialReset(thetaAcc, pos_reset);
+        float theta_reset = theta_valid ? thetaAcc : theta;
+        partialReset(theta_reset, pos_reset);
         diag_valid_ = false;
         return false;
     }
@@ -215,7 +231,7 @@ bool BalancerEKF::step(float thetaAcc, float vEnc, float posEnc, float gyroPitch
 
     float R_step[EKF_M * EKF_M];
     memcpy(R_step, R_, sizeof(R_step));
-    R_step[0] = measurement_var;
+    R_step[0] = theta_valid ? measurement_var : 1e6f;
     if (!vel_valid) {
         R_step[1 * EKF_M + 1] = 1e6f;
     }

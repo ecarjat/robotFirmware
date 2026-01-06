@@ -29,9 +29,15 @@ void control_timer_init(void);
 
 /**
  * Start the control timer (TIM2).
- * After this call, control_timer_pending() will become true every 1ms.
+ * After this call, control_timer_pending() will become true at the configured rate.
  */
 void control_timer_start(void);
+
+/**
+ * Configure the control timer rate (Hz).
+ * Safe to call before or after control_timer_start().
+ */
+void control_timer_set_rate_hz(float rate_hz);
 
 /**
  * Stop the control timer.

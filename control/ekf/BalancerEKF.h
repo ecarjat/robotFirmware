@@ -48,6 +48,7 @@ public:
     float getThetaMeasurementVarianceBase() const;
     void setInitialTheta(float theta_rad);
     void setInitialState(float theta_rad, float pos_m);
+    void setFallbackDt(float dtSeconds);
 
     // Check if we're in a post-reset damping period
     bool isInDampingPeriod() const { return damping_steps_remaining_ > 0; }
@@ -61,6 +62,7 @@ private:
     float R_[EKF_M * EKF_M];
     float lastGyroPitch_;
     float lastDt_;
+    float fallback_dt_;
     BalancerEkfDiag diag_;
     bool diag_valid_;
     float theta_r_base_;

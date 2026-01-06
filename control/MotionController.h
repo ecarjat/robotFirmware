@@ -21,6 +21,7 @@ public:
 
     void setRobotParams(const RobotParams& params);
     void setBalanceGains(const balance_gains_t& gains);
+    void setControlDt(float dtSeconds);
 
     void setTeleopCommands(float forwardCmd, float turnCmd);
     void setTargetVelocity(float linearVelocityMps);
@@ -96,6 +97,7 @@ private:
     float _turnGain;
     float _yawDampGain;
     float _yawBlendAlpha;
+    float _controlDt;
 
     float _prevVelocityLeft = 0.0f;
     float _prevVelocityRight = 0.0f;

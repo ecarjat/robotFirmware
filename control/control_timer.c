@@ -1,5 +1,8 @@
 #include "control_timer.h"
+#include "config_control.h"
 #include "stm32h7xx_hal.h"
+#include "stm32h7xx_hal_tim.h"
+#include "stm32h7xx_ll_rcc.h"
 
 /* DWT cycle counter for high-resolution timing */
 #define DWT_CTRL    (*(volatile uint32_t *)0xE0001000)
@@ -11,10 +14,11 @@
 #define CoreDebug_DEMCR_TRCENA (1UL << 24)
 
 /* External timer handle from main.c */
+#include "app_config.h"
 extern TIM_HandleTypeDef htim2;
 
-/* Control period in microseconds (1ms = 1000us) */
-#define CONTROL_PERIOD_US 1000
+/* Default control period in microseconds */
+#define CONTROL_PERIOD_DEFAULT_US ((uint32_t)(1000000.0f / CONTROL_DEFAULT_HZ + 0.5f))
 
 /* State variables - volatile for ISR access */
 static volatile bool s_pending = false;
@@ -29,6 +33,9 @@ static control_timing_diag_t s_diag = {0};
 /* CPU frequency for cycle-to-us conversion */
 static uint32_t s_cpu_freq_mhz = 0;
 
+/* Control period for overrun detection */
+static uint32_t s_period_us = CONTROL_PERIOD_DEFAULT_US;
+
 /**
  * Convert DWT cycles to microseconds.
  */
@@ -38,6 +45,15 @@ static inline uint32_t cycles_to_us(uint32_t cycles)
         return 0;
     }
     return cycles / s_cpu_freq_mhz;
+}
+
+static uint32_t control_timer_tim2_clk_hz(void)
+{
+    uint32_t pclk1 = HAL_RCC_GetPCLK1Freq();
+    if (LL_RCC_GetAPB1Prescaler() != LL_RCC_APB1_DIV_1) {
+        pclk1 *= 2U;
+    }
+    return pclk1;
 }
 
 void control_timer_init(void)
@@ -54,6 +70,7 @@ void control_timer_init(void)
     s_pending = false;
     s_isr_timestamp = 0;
     s_cycle_start = 0;
+    s_period_us = CONTROL_PERIOD_DEFAULT_US;
 
     control_timer_reset_diag();
 }
@@ -62,6 +79,70 @@ void control_timer_start(void)
 {
     /* Start TIM2 in interrupt mode */
     HAL_TIM_Base_Start_IT(&htim2);
+}
+
+void control_timer_set_rate_hz(float rate_hz)
+{
+    if (rate_hz <= 1e-3f) {
+        rate_hz = CONTROL_DEFAULT_HZ;
+    }
+
+    uint32_t tim_clk_hz = control_timer_tim2_clk_hz();
+    if (tim_clk_hz == 0U) {
+        return;
+    }
+
+    const uint32_t target_tick_hz = 1000000U;
+    uint64_t divider = (tim_clk_hz + (target_tick_hz / 2U)) / target_tick_hz;
+    if (divider < 1U) {
+        divider = 1U;
+    }
+    if (divider > 0x10000ULL) {
+        divider = 0x10000ULL;
+    }
+    uint32_t prescaler = (uint32_t)(divider - 1U);
+    uint32_t tick_hz = tim_clk_hz / (uint32_t)divider;
+
+    double period_ticks = (double)tick_hz / (double)rate_hz;
+    if (period_ticks < 1.0) {
+        period_ticks = 1.0;
+    }
+    uint64_t period_plus = (uint64_t)(period_ticks + 0.5);
+    if (period_plus < 1U) {
+        period_plus = 1U;
+    }
+    if (period_plus > 0x100000000ULL) {
+        period_plus = 0x100000000ULL;
+    }
+    uint32_t period = (uint32_t)(period_plus - 1U);
+
+    double actual_rate = (double)tick_hz / (double)(period + 1U);
+    if (actual_rate > 0.0) {
+        s_period_us = (uint32_t)(1000000.0 / actual_rate + 0.5);
+    } else {
+        s_period_us = CONTROL_PERIOD_DEFAULT_US;
+    }
+
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    bool was_running = (htim2.Instance->CR1 & TIM_CR1_CEN) != 0U;
+    if (was_running) {
+        HAL_TIM_Base_Stop_IT(&htim2);
+    }
+    __HAL_TIM_SET_PRESCALER(&htim2, prescaler);
+    __HAL_TIM_SET_AUTORELOAD(&htim2, period);
+    __HAL_TIM_SET_COUNTER(&htim2, 0U);
+    htim2.Instance->EGR = TIM_EGR_UG;
+    if (was_running) {
+        HAL_TIM_Base_Start_IT(&htim2);
+    }
+    __set_PRIMASK(primask);
+
+    htim2.Init.Prescaler = prescaler;
+    htim2.Init.Period = period;
+
+    APP_LOG_INFO("Control rate set: req=%.2f Hz actual=%.2f Hz period_us=%u", (double)rate_hz,
+                 actual_rate, (unsigned)s_period_us);
 }
 
 void control_timer_stop(void)
@@ -77,11 +158,18 @@ bool control_timer_pending(void)
 
 void control_timer_begin_cycle(void)
 {
-    /* Record start timestamp before clearing flag */
+    /* Record start timestamp */
     s_cycle_start = DWT_CYCCNT;
 
-    /* Calculate latency from ISR to now */
-    uint32_t isr_ts = s_isr_timestamp;  /* Read once for consistency */
+    /* Atomically read ISR timestamp and clear pending flag.
+     * This prevents race condition where ISR fires between reading
+     * the timestamp and clearing the flag. */
+    __disable_irq();
+    uint32_t isr_ts = s_isr_timestamp;
+    s_pending = false;
+    __enable_irq();
+
+    /* Calculate latency from ISR to now (outside critical section) */
     uint32_t latency_cycles = s_cycle_start - isr_ts;
     uint32_t latency_us = cycles_to_us(latency_cycles);
 
@@ -89,9 +177,6 @@ void control_timer_begin_cycle(void)
     if (latency_us > s_diag.max_latency_us) {
         s_diag.max_latency_us = latency_us;
     }
-
-    /* Clear pending flag - must be after reading timestamp */
-    s_pending = false;
 }
 
 void control_timer_end_cycle(void)
@@ -108,7 +193,7 @@ void control_timer_end_cycle(void)
     }
 
     /* Check for overrun (loop took longer than period) */
-    if (exec_us > CONTROL_PERIOD_US) {
+    if (exec_us > s_period_us) {
         s_diag.overrun_count++;
     }
 }

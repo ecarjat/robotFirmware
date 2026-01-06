@@ -32,7 +32,7 @@ extern "C" {
 #define FRAME_ESC_MARKER  0xDCU  /* 0xDB 0xDC = 0xA5 */
 #define FRAME_ESC_ESC     0xDDU  /* 0xDB 0xDD = 0xDB */
 
-#define FRAME_MAX_UNESCAPED_SIZE  64U
+#define FRAME_MAX_UNESCAPED_SIZE  64U  /* LEN + TYPE + PAYLOAD + CRC */
 #define FRAME_MAX_ESCAPED_SIZE    (2U + FRAME_MAX_UNESCAPED_SIZE * 2U)
 #define FRAME_CRC_SIZE            4U
 

@@ -494,7 +494,6 @@ void param_storage_get_defaults(robot_params_t *params)
     /* Wheel geometry defaults */
     params->wheel_radius_m = 0.033f;         /* 33mm radius */
     params->wheel_base_m = 0.15f;            /* 150mm wheel base */
-    params->encoder_ticks_per_rev = 1440.0f; /* Typical encoder */
 
     /* IMU calibration (identity = uncalibrated) */
     param_init_imu_calib(&params->imu_bmi270);

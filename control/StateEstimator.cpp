@@ -48,6 +48,7 @@ StateEstimator::StateEstimator()
       initSampleCount_(0),
       initPitchSum_(0.0f),
       wheelRadius_(PARAM_WHEEL_RADIUS),
+      control_dt_(CONTROL_DT),
       initialized_(false),
       ekf_log_data_{},
       ekf_log_valid_(false),
@@ -111,6 +112,14 @@ void StateEstimator::resetTiming()
     lastUpdateMs_ = 0U;
 }
 
+void StateEstimator::setControlDt(float dtSeconds)
+{
+    if (dtSeconds > 0.0f) {
+        control_dt_ = dtSeconds;
+        ekf_.setFallbackDt(dtSeconds);
+    }
+}
+
 void StateEstimator::setImuRotations(const float *primary, const float *secondary)
 {
     if (primary != NULL) {
@@ -151,11 +160,11 @@ void StateEstimator::update(const ImuReading &primary, const ImuReading &seconda
     if (lastUpdateMs_ != 0U)
     {
         uint32_t delta_ms = now_ms - lastUpdateMs_;
-        dt_s = (delta_ms > 0U) ? (0.001f * (float)delta_ms) : CONTROL_DT;
+        dt_s = (delta_ms > 0U) ? (0.001f * (float)delta_ms) : control_dt_;
     }
     else
     {
-        dt_s = CONTROL_DT;
+        dt_s = control_dt_;
     }
     lastUpdateMs_ = now_ms;
 
@@ -335,9 +344,11 @@ void StateEstimator::update(const ImuReading &primary, const ImuReading &seconda
         return;
     }
 
-    float theta_acc = atan2f(-accel_body[0],
-                             sqrtf(accel_body[1] * accel_body[1] +
-                                   accel_body[2] * accel_body[2]));
+    float theta_acc = NAN;
+    float accel_yz = sqrtf(accel_body[1] * accel_body[1] + accel_body[2] * accel_body[2]);
+    if (accel_yz > 1e-6f && isfinite(accel_norm_g)) {
+        theta_acc = atan2f(-accel_body[0], accel_yz);
+    }
     float gyro_pitch = gyro_body[1];
 
     float theta_var = ekf_.getThetaMeasurementVarianceBase();

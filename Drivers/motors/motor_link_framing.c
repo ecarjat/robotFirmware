@@ -141,6 +141,9 @@ size_t frame_encode(uint8_t type,
     if (unescaped_len > 255U) {
         return 0U;  /* Length field is 1 byte */
     }
+    if ((1U + unescaped_len) > FRAME_MAX_UNESCAPED_SIZE) {
+        return 0U;  /* LEN + TYPE + PAYLOAD + CRC must fit parser buffer */
+    }
 
     /* Build unescaped frame for CRC calculation: [LEN][TYPE][PAYLOAD] */
     uint8_t temp[FRAME_MAX_UNESCAPED_SIZE];
@@ -205,6 +208,17 @@ void frame_parser_init(frame_parser_t *parser)
     parser->state = FRAME_STATE_IDLE;
 }
 
+static void frame_parser_reset(frame_parser_t *parser)
+{
+    if (parser == NULL) {
+        return;
+    }
+    parser->state = FRAME_STATE_IDLE;
+    parser->pos = 0U;
+    parser->expected_len = 0U;
+    parser->esc_pending = 0U;
+}
+
 /*
  * Process a single unescaped byte.
  */
@@ -225,10 +239,10 @@ static void parser_handle_byte(frame_parser_t *parser, uint8_t byte)
         parser->expected_len = byte;
         /* Minimum length: TYPE(1) + CRC32(4) = 5 */
         if (parser->expected_len < (1U + FRAME_CRC_SIZE) ||
-            parser->expected_len > FRAME_MAX_UNESCAPED_SIZE) {
+            ((size_t)parser->expected_len + 1U) > sizeof(parser->buf)) {
             /* Invalid length - back to idle */
             parser->sync_losses++;
-            parser->state = FRAME_STATE_IDLE;
+            frame_parser_reset(parser);
         } else {
             /* Store length in buffer for CRC calculation */
             parser->buf[0] = byte;
@@ -239,9 +253,12 @@ static void parser_handle_byte(frame_parser_t *parser, uint8_t byte)
 
     case FRAME_STATE_DATA:
         /* Accumulate TYPE + PAYLOAD + CRC */
-        if (parser->pos < sizeof(parser->buf)) {
-            parser->buf[parser->pos++] = byte;
+        if (parser->pos >= sizeof(parser->buf)) {
+            parser->sync_losses++;
+            frame_parser_reset(parser);
+            break;
         }
+        parser->buf[parser->pos++] = byte;
         /* Check if we have all data: LEN(1) + TYPE(1) + PAYLOAD(N) + CRC(1) = expected_len + 1 */
         if (parser->pos >= (size_t)(parser->expected_len + 1U)) {
             parser->state = FRAME_STATE_IDLE;
@@ -287,7 +304,7 @@ void frame_parser_feed(frame_parser_t *parser, const uint8_t *data, size_t len)
             } else {
                 /* Invalid escape sequence - sync loss */
                 parser->sync_losses++;
-                parser->state = FRAME_STATE_IDLE;
+                frame_parser_reset(parser);
             }
             continue;
         }
@@ -322,13 +339,13 @@ bool frame_parser_pop(frame_parser_t *parser,
     uint8_t len_field = parser->buf[0];
     if (parser->pos != (size_t)(len_field + 1U)) {
         /* Size mismatch */
-        parser->pos = 0U;
+        frame_parser_reset(parser);
         return false;
     }
 
     /* Minimum frame: LEN + TYPE + CRC32 = 1 + 1 + 4 = 6 bytes */
     if (parser->pos < (1U + 1U + FRAME_CRC_SIZE)) {
-        parser->pos = 0U;
+        frame_parser_reset(parser);
         return false;
     }
 
@@ -341,7 +358,7 @@ bool frame_parser_pop(frame_parser_t *parser,
 
     if (computed_crc != received_crc) {
         parser->crc_errors++;
-        parser->pos = 0U;
+        frame_parser_reset(parser);
         return false;
     }
 
@@ -361,6 +378,6 @@ bool frame_parser_pop(frame_parser_t *parser,
     }
 
     /* Clear for next frame */
-    parser->pos = 0U;
+    frame_parser_reset(parser);
     return true;
 }

@@ -89,21 +89,21 @@ void imu_sched_run(void)
 **Fix Applied:** Implemented timer-driven control loop using TIM2 (Option A: ISR with flag):
 
 1. **New module `control_timer.c/h`** provides:
-   - Hardware timer (TIM2) firing at 1kHz
+   - Hardware timer (TIM2) firing at the configured `control_rate_hz`
    - ISR sets volatile flag and records DWT timestamp
    - Main loop checks flag, runs control at deterministic rate
    - Latency tracking (ISR to loop start)
    - Execution time measurement
    - Overrun detection
 
-2. **Timer configuration** (via CubeMX):
-   - TIM2 on APB1 (500MHz / 2 = 250MHz timer clock)
-   - Prescaler: 499 → 500kHz tick
-   - Period: 999 → 1ms (1kHz control rate)
+2. **Timer configuration** (runtime):
+   - TIM2 on APB1 (timer clock derived from APB1)
+   - Prescaler/period computed at runtime to match `control_rate_hz`
+   - Default rate is 400Hz unless overridden by params
 
 3. **Integration in `app_main.c`**:
 ```c
-/* Timer-driven control loop: run when TIM2 fires (1kHz) */
+/* Timer-driven control loop: run when TIM2 fires (control_rate_hz) */
 if (control_timer_pending()) {
     control_timer_begin_cycle();
     motion_control_tick(now);
@@ -114,7 +114,7 @@ if (control_timer_pending()) {
 
 4. **Diagnostics available** via `control_timer_get_diag()`:
    - `loop_count`: Total control iterations
-   - `overrun_count`: Times loop exceeded 1ms
+   - `overrun_count`: Times loop exceeded configured period
    - `max_latency_us`: Worst-case ISR-to-loop latency
    - `max_execution_us`: Worst-case loop execution time
 

@@ -52,6 +52,7 @@ public:
 
     bool begin(const RobotParams &params);
     void update(const ImuReading &primary, const ImuReading &secondary, uint32_t now_ms, float v_enc);
+    void setControlDt(float dtSeconds);
     void setImuRotations(const float *primary, const float *secondary);
 
     StateEstimate getEstimate() const;
@@ -90,6 +91,7 @@ private:
     float initPitchSum_;
 
     float wheelRadius_;
+    float control_dt_;
 
     bool initialized_;
 

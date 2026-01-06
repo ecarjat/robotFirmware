@@ -158,7 +158,6 @@ typedef struct {
     /* Wheel geometry */
     float wheel_radius_m;
     float wheel_base_m;
-    float encoder_ticks_per_rev;
 
     /* IMU calibration */
     int16_t gyro_bias[3];       /* mdps offset */

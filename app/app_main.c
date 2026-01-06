@@ -304,8 +304,9 @@ static void app_init(void) {
   robot_mux_register(&s_mux, ROBOT_CHANNEL_CMD, app_cmd_handler, NULL);
   app_link_start();
 
-  /* Initialize and start control timer for 1ms control loop */
+  /* Initialize and start control timer based on control_rate_hz */
   control_timer_init();
+  control_timer_set_rate_hz(g_robot_params.control_rate_hz);
   control_timer_start();
 
   /* Initialize LED status state machine */
@@ -327,7 +328,16 @@ static void app_idle_tick(void) {
   motor_link_poll();
 #endif
 
-  /* Timer-driven control loop: run when TIM2 fires (1kHz) */
+  /* Heartbeat timeout detection: disarm robot if no commands received */
+  if ((now - s_last_cmd_ms) > APP_HEARTBEAT_TIMEOUT_MS) {
+    motion_control_set_mode(MOTION_MODE_DISARMED);
+#ifdef ENABLE_MOTORS
+    motor_link_enable(false);
+#endif
+    led_status_set_flag(LED_STATUS_TELEM_FAILURE);
+  }
+
+  /* Timer-driven control loop: run when TIM2 fires (control_rate_hz) */
   if (control_timer_pending()) {
     control_timer_begin_cycle();
     motion_control_tick(now);
@@ -1312,6 +1322,7 @@ static void app_rpc_handle(const robot_frame_t *frame) {
       return;
     }
     case ROBOT_RPC_METHOD_SET_PARAM: {
+      float old_rate_hz = g_robot_params.control_rate_hz;
       if (length == 0U) {
         if (req_data_len != 0U ||
             (req.flags & ROBOT_RPC_FLAG_SAVE) == 0U) {
@@ -1338,10 +1349,18 @@ static void app_rpc_handle(const robot_frame_t *frame) {
       memcpy(&updated, &g_robot_params, sizeof(updated));
       memcpy((uint8_t *)&updated + offset, req_data, length);
 
+      uint32_t primask = __get_PRIMASK();
+      __disable_irq();
       bool changed = (memcmp(&updated, &g_robot_params, sizeof(updated)) != 0);
       if (changed) {
         memcpy(&g_robot_params, &updated, sizeof(updated));
+      }
+      __set_PRIMASK(primask);
+      if (changed) {
         motion_control_apply_params();
+        if (fabsf(g_robot_params.control_rate_hz - old_rate_hz) > 1e-3f) {
+          control_timer_set_rate_hz(g_robot_params.control_rate_hz);
+        }
       }
 
       uint8_t status = ROBOT_RPC_STATUS_OK;

@@ -35,6 +35,7 @@ MotionController::MotionController(const RobotParams& robotParams)
       _turnGain(TURN_TORQUE_GAIN),
       _yawDampGain(YAW_DAMP_GAIN),
       _yawBlendAlpha(YAW_BLEND_ALPHA),
+      _controlDt(CONTROL_DT),
       _velocitySlewRate(VELOCITY_SLEW_RATE_RAD_PER_S2)
 {
 }
@@ -67,6 +68,13 @@ void MotionController::setBalanceGains(const balance_gains_t& gains)
 
     _iqMax = gains.IqMax;
     _velPid_iMax = gains.iV_max;
+}
+
+void MotionController::setControlDt(float dtSeconds)
+{
+    if (dtSeconds > 0.0f) {
+        _controlDt = dtSeconds;
+    }
 }
 
 void MotionController::setTeleopCommands(float forwardCmd, float turnCmd)
@@ -121,7 +129,7 @@ float MotionController::computePid(PidState& state,
                                    float outputLimit,
                                    float integralLimit)
 {
-    if (dt <= 0.0f) dt = 1e-4f;
+    if (dt <= 0.0f) dt = _controlDt;
 
     float error = setpoint - measurement;
 
@@ -175,7 +183,7 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
 {
     if (dtSeconds <= 0.0f)
     {
-        dtSeconds = 1e-4f;
+        dtSeconds = _controlDt;
     }
 
     Command cmd{};
@@ -183,10 +191,13 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
 
     /* Compute velocity PID integral limit:
      * - If Ki and iMax are configured, limit = iMax/Ki (in velocity units)
+     * - Cap at kDefaultIntegralLimit to prevent huge limits with tiny Ki
      * - Otherwise use a large default to prevent unbounded windup */
-    float velIntegralLimit = ((_velPid_Ki > kGainEpsilon) && (_velPid_iMax > 0.0f))
-        ? (_velPid_iMax / _velPid_Ki)
-        : kDefaultIntegralLimit;
+    float velIntegralLimit = kDefaultIntegralLimit;
+    if ((_velPid_Ki >= kGainEpsilon) && (_velPid_iMax > 0.0f)) {
+        float computed = _velPid_iMax / _velPid_Ki;
+        velIntegralLimit = (computed < kDefaultIntegralLimit) ? computed : kDefaultIntegralLimit;
+    }
 
     float pitchTarget = computePid(
         _velocityPid,
@@ -228,10 +239,13 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
         _pitchPid.integral += pitchError * dtSeconds;
     }
     /* Pitch PID integral limit: if Ki is configured, limit in pitch error units;
+     * Cap at kDefaultIntegralLimit to prevent huge limits with tiny Ki;
      * otherwise use outputLimit directly (effectively disabling anti-windup) */
-    float integralLimit = (_pitchPid_Ki > kGainEpsilon)
-        ? outputLimit / _pitchPid_Ki
-        : kDefaultIntegralLimit;
+    float integralLimit = kDefaultIntegralLimit;
+    if (_pitchPid_Ki >= kGainEpsilon) {
+        float computed = outputLimit / _pitchPid_Ki;
+        integralLimit = (computed < kDefaultIntegralLimit) ? computed : kDefaultIntegralLimit;
+    }
     if (_pitchPid.integral > integralLimit) _pitchPid.integral = integralLimit;
     if (_pitchPid.integral < -integralLimit) _pitchPid.integral = -integralLimit;
 
@@ -268,7 +282,7 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
 MotionController::ControlOutput
 MotionController::applyVelocitySlew(ControlOutput desired, float dt)
 {
-    if (dt <= 0.0f) dt = 1e-3f;
+    if (dt <= 0.0f) dt = _controlDt;
     float maxStep = _velocitySlewRate * dt;
 
     ControlOutput out;
