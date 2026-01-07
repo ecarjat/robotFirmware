@@ -1,6 +1,8 @@
 #include "param_storage.h"
+#include "app_config.h"
 #include "config_control.h"
 #include "crc32.h"
+#include "debug_wdog.h"
 #include "motion_modes.h"
 #include "stm32h7xx_hal.h"
 
@@ -105,7 +107,10 @@ static int param_erase_sector(void)
     /*
      * Risk accepted: flash erase disables interrupts for the full duration of the
      * erase operation on STM32H7.
+     * WARNING: This can take 1-2 seconds. Ensure IWDG timeout is sufficient
+     * or that a watchdog reset during save is acceptable.
      */
+    debug_wdog_refresh();
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
 
@@ -151,6 +156,7 @@ static int param_program(uint32_t address, const uint8_t *data, uint32_t length)
         return PARAM_ERR_FLASH;
     }
 
+    debug_wdog_refresh();
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
 
@@ -340,11 +346,13 @@ int param_storage_load(robot_params_t *params)
     if (s_param.cache_valid)
     {
         memcpy(params, &s_param.cached_params, sizeof(robot_params_t));
+        APP_LOG_INFO("Loaded params from flash");
         return PARAM_OK;
     }
 
     /* No valid parameters found, use defaults */
     param_storage_get_defaults(params);
+    APP_LOG_INFO("No saved params, using defaults");
     return PARAM_ERR_NOT_FOUND;
 }
 

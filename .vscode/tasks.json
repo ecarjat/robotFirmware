@@ -37,7 +37,7 @@
 				"reboot-bootloader",
 				"&&",
 				"sleep",
-				"1",
+				"2",
 				"&&",
 				"poetry",
 				"run",

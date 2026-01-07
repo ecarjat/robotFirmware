@@ -15,6 +15,7 @@ extern "C" {
  * access this for runtime configuration.
  */
 extern robot_params_t g_robot_params;
+extern volatile uint8_t g_estop_active;
 
 void app_main(void);
 

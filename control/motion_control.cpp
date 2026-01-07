@@ -4,6 +4,8 @@
 #include "StateEstimator.h"
 #include "config_control.h"
 #include "types.h"
+#include "log.h"
+#include "app_config.h"
 
 #include <math.h>
 #include <string.h>
@@ -286,33 +288,39 @@ bool motion_control_can_arm(void)
     motion_mode_t mode = motion_modes_get();
     if (mode != MOTION_MODE_DISARMED && mode != MOTION_MODE_FALLEN)
     {
+        APP_LOG_ERROR("Arm rejected: mode=%u", (unsigned int)mode);
         return false;
     }
 
     /* Require valid calibration before allowing balance */
     if (!motion_control_is_calibrated())
     {
+        APP_LOG_ERROR("Arm rejected: not calibrated");
         return false;
     }
 
     StateEstimate estimate = s_estimator.getEstimate();
     if (!estimate.valid)
     {
+        APP_LOG_ERROR("Arm rejected: estimate invalid");
         return false;
     }
     if (fabsf(estimate.theta) > MOTION_ARM_UPRIGHT_RAD)
     {
+        APP_LOG_ERROR("Arm rejected: not upright (%.2f rad)", (double)estimate.theta);
         return false;
     }
     motion_control_imu_health_t health;
     if (!motion_control_get_imu_health(&health) || !health.valid)
     {
+        APP_LOG_ERROR("Arm rejected: IMU unhealthy");
         return false;
     }
     float left_w = 0.0f;
     float right_w = 0.0f;
     if (!motor_link_get_wheel_velocities(&left_w, &right_w))
     {
+        APP_LOG_ERROR("Arm rejected: motor link down");
         return false;
     }
     return true;
