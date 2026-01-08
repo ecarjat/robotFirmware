@@ -40,7 +40,7 @@ extern "C" {
  */
 
 #define PARAM_MAGIC             0x524F424FUL  /* 'ROBO' */
-#define PARAM_VERSION           5U
+#define PARAM_VERSION           6U
 #define PARAM_FLASH_BASE        0x080C0000UL
 #define PARAM_FLASH_SIZE        0x00020000UL  /* 128 KB */
 #define PARAM_FLASH_END         (PARAM_FLASH_BASE + PARAM_FLASH_SIZE)
@@ -131,8 +131,11 @@ typedef struct {
     uint32_t uart_baudrate; /* not used */
     uint8_t  robot_id;
 
+    /* ADC voltage divider (PC4) */
+    float adc_voltage_multiplier; /* Voltage divider multiplier for ADC on PC4 */
+
     /* Reserved for future use */
-    uint8_t  reserved[16];
+    uint8_t  reserved[12];
 } robot_params_t;
 
 /**

@@ -529,6 +529,9 @@ void param_storage_get_defaults(robot_params_t *params)
     /* Communication */
     params->uart_baudrate = 115200U;
     params->robot_id = 1U;
+
+    /* ADC voltage divider */
+    params->adc_voltage_multiplier = 1.0f; /* Default 1:1, no voltage division */
 }
 
 int param_storage_erase(void)

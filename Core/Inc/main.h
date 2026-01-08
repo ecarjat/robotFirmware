@@ -36,7 +36,7 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
-
+extern ADC_HandleTypeDef hadc1;
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
@@ -84,6 +84,8 @@ void Error_Handler(void);
 #define ESP32_RX_GPIO_Port GPIOA
 #define BTN1_Pin GPIO_PIN_4
 #define BTN1_GPIO_Port GPIOA
+#define Voltage_Pin GPIO_PIN_4
+#define Voltage_GPIO_Port GPIOC
 #define LED_RED_Pin GPIO_PIN_0
 #define LED_RED_GPIO_Port GPIOB
 #define LED_GREEN_Pin GPIO_PIN_1

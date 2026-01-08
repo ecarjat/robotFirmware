@@ -49,11 +49,13 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     app/app_main.c
     app/app_link.c
+    app/app_adc.c
     app/app_arm.c
     app/app_cmd.c
     app/app_imu.c
     app/app_motor.c
     app/app_telem.c
+    app/app_profiling.c
     app/app_rpc.c
     common/crc32.c
     common/framing_cobs.c

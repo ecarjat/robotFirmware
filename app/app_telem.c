@@ -3,6 +3,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "app_adc.h"
 #include "app_config.h"
 #include "app_link.h"
 #include "app_main.h"
@@ -102,6 +103,12 @@ static void app_send_telem(void) {
     telem.iq_left = ctrl_out.iq_left;
     telem.iq_right = ctrl_out.iq_right;
     telem.pitch_target_rad = ctrl_out.pitch_target_rad;
+  }
+
+  /* ADC voltage reading */
+  float adc_voltage = 0.0f;
+  if (app_adc_read_voltage(&adc_voltage)) {
+    telem.adc_voltage = adc_voltage;
   }
 
   if (!app_link_send(ROBOT_MSG_TELEM_FRAME_V2, 0U, (const uint8_t *)&telem,

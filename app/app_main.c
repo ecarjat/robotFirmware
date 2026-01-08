@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "app_adc.h"
 #include "app_arm.h"
 #include "app_config.h"
 #include "app_imu.h"
@@ -12,6 +13,7 @@
 #include "app_main.h"
 #include "app_motor.h"
 #include "app_telem.h"
+#include "app_profiling.h"
 
 #include "debug_wdog.h"
 
@@ -35,6 +37,7 @@
 static void app_init(void);
 static void app_idle_tick(void);
 void app_cdc_handle_frame(const uint8_t *data, uint32_t len);
+
 void app_main(void) {
   app_init();
 
@@ -52,14 +55,23 @@ void app_main(void) {
     /* 2. High Priority: Link Polling
      * Keep communication buffers drained.
      */
+    uint32_t start = APP_PROFILE_GET_TIME();
     app_link_poll();
+    app_profiling_record(APP_PROF_LINK, start);
+
 #ifdef ENABLE_MOTORS
+    start = APP_PROFILE_GET_TIME();
     motor_link_poll();
+    app_profiling_record(APP_PROF_MOTOR, start);
 #endif
+    start = APP_PROFILE_GET_TIME();
     imu_sched_tick();
+    app_profiling_record(APP_PROF_IMU, start);
 
     /* 3. Background Tasks (Telemetry, Logging, LED, etc.) */
+    start = APP_PROFILE_GET_TIME();
     app_idle_tick();
+    app_profiling_record(APP_PROF_IDLE, start);
   }
 }
 
@@ -81,9 +93,8 @@ volatile uint8_t g_estop_active = 0U;
 
 static void app_init(void) {
   WDOG_CHECKPOINT(WDOG_CP_APP_INIT_START);
-  HAL_Delay(2000);
-  /* TODO: Verify if 2000ms delay is strictly necessary for hardware settling */
-  HAL_Delay(500); 
+  /* Short delay for sensor power stabilization */
+  HAL_Delay(200);
   APP_LOG_INFO("Booting robot firmware (frame v%u)", ROBOT_FRAME_VERSION);
   APP_LOG_INFO("CMD channel id: %u", ROBOT_CHANNEL_CMD);
 
@@ -98,6 +109,7 @@ static void app_init(void) {
 
   s_last_cmd_ms = HAL_GetTick();
   app_imu_init();
+  app_adc_init();
 
 #ifdef ENABLE_MOTORS
   WDOG_CHECKPOINT(WDOG_CP_MOTOR_INIT);
@@ -108,6 +120,7 @@ static void app_init(void) {
                                   g_robot_params.motor_direction[1]);
 #endif
 
+  app_profiling_init();
   app_telem_init();
   app_link_start();
   /* Initialize and start control timer based on control_rate_hz */
@@ -141,10 +154,7 @@ static void app_idle_tick(void) {
 
   /* Heartbeat timeout detection: disarm robot if no commands received */
   if ((now - s_last_cmd_ms) > APP_HEARTBEAT_TIMEOUT_MS) {
-    motion_control_set_mode(MOTION_MODE_DISARMED);
-#ifdef ENABLE_MOTORS
-    motor_link_enable(false);
-#endif
+    app_disarm_robot();
     led_status_set_flag(LED_STATUS_TELEM_FAILURE);
     // APP_LOG_ERROR("Link timeout: no frames for %lu ms",
     //               (unsigned long)(now - s_last_cmd_ms));
@@ -210,6 +220,7 @@ static void app_idle_tick(void) {
         (unsigned long)motor_link_get_left_telem_late(),
         (unsigned long)motor_link_get_right_telem_late());
 #endif
+    app_profiling_log();
   }
 
   if ((now - s_last_led_ms) >= APP_IDLE_TICK_MS) {
@@ -256,7 +267,6 @@ void app_cdc_handle_frame(const uint8_t *data, uint32_t len) {
   if (data == NULL || len == 0U) {
     return;
   }
-  /* CDC frames share the link decoder with UART frames. */
-  /* Reuse the UART COBS accumulator so partial CDC packets are handled. */
-  app_link_process_chunk(data, len);
+  /* Push to ring buffer for processing in main loop to avoid blocking ISR */
+  app_link_feed_cdc(data, len);
 }
