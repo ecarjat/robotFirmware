@@ -13,6 +13,7 @@
 #endif
 #include "app_config.h"
 #include "app_main.h"
+#include "debug_wdog.h"
 #include "imu_bus.h"
 #include "imu_sched.h"
 #include "motion_control.h"
@@ -229,6 +230,7 @@ static bool app_imu_calib_capture_bmi270(float accel[3], float gyro[3],
       ++count;
     }
     imu_sched_run();
+    debug_wdog_refresh();
     HAL_Delay(1U);
   }
 
@@ -283,6 +285,7 @@ static bool app_imu_calib_capture_icm42688(float accel[3], float gyro[3],
       ++count;
     }
     imu_sched_run();
+    debug_wdog_refresh();
     HAL_Delay(1U);
   }
 

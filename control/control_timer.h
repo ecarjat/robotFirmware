@@ -19,6 +19,7 @@ typedef struct {
     uint32_t max_execution_us;    /**< Max control loop execution time */
     uint32_t last_latency_us;     /**< Most recent latency measurement */
     uint32_t last_execution_us;   /**< Most recent execution time */
+    uint64_t sum_execution_us;    /**< Total execution time for average calculation */
 } control_timing_diag_t;
 
 /**

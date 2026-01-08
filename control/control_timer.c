@@ -191,6 +191,7 @@ void control_timer_end_cycle(void)
     if (exec_us > s_diag.max_execution_us) {
         s_diag.max_execution_us = exec_us;
     }
+    s_diag.sum_execution_us += exec_us;
 
     /* Check for overrun (loop took longer than period) */
     if (exec_us > s_period_us) {
@@ -217,6 +218,7 @@ void control_timer_reset_diag(void)
     s_diag.max_execution_us = 0;
     s_diag.last_latency_us = 0;
     s_diag.last_execution_us = 0;
+    s_diag.sum_execution_us = 0;
     __enable_irq();
 }
 

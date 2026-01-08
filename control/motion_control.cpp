@@ -352,6 +352,9 @@ void motion_control_tick(uint32_t now_ms)
             dt_s = 0.001f * (float)delta_ms;
         }
     }
+    if (dt_s > EKF_MAX_DT) {
+        dt_s = EKF_MAX_DT;
+    }
     s_last_tick_ms = now_ms;
 
     ImuReading primary{};

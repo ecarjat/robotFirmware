@@ -14,6 +14,12 @@ static uint8_t s_link_tx_queue[APP_LINK_TX_QUEUE_DEPTH][ROBOT_FRAME_MAX_ENCODED]
     __attribute__((section(".dma_buffer"), aligned(32)));
 static uint16_t s_link_tx_len[APP_LINK_TX_QUEUE_DEPTH];
 
+/* CDC Ring Buffer */
+#define APP_LINK_CDC_BUFFER_BYTES 1024U
+static uint8_t s_cdc_rx_buffer[APP_LINK_CDC_BUFFER_BYTES];
+static volatile size_t s_cdc_rx_head = 0U;
+static volatile size_t s_cdc_rx_tail = 0U;
+
 static robot_mux_t s_mux;
 
 static volatile uint8_t s_link_tx_busy = 0U;
@@ -24,8 +30,15 @@ static uint16_t s_seq_counters[ROBOT_CHANNEL_MAX + 1U] = {0};
 static size_t s_uart_rx_last_pos = 0U;
 static volatile uint16_t s_uart_rx_pending_size = 0U;
 static volatile uint8_t s_uart_rx_event_pending = 0U;
-static uint8_t s_cobs_frame_buffer[APP_LINK_FRAME_BUFFER_BYTES];
-static size_t s_cobs_frame_len = 0U;
+
+typedef struct {
+  uint8_t buffer[APP_LINK_FRAME_BUFFER_BYTES];
+  size_t len;
+} link_decoder_t;
+
+static link_decoder_t s_uart_decoder;
+static link_decoder_t s_cdc_decoder;
+
 static volatile uint32_t s_link_overflows = 0U;
 static volatile uint32_t s_link_decode_failures = 0U;
 static volatile uint32_t s_link_decode_last_len = 0U;
@@ -37,7 +50,7 @@ static volatile uint32_t s_link_send_last_hal_state = 0U;
 static volatile uint32_t s_link_send_last_hal_err = 0U;
 uint32_t s_last_cmd_ms = 0U;
 
-static void app_link_flush_frame(void);
+static void app_link_flush_frame(link_decoder_t *ctx);
 static void app_link_handle_encoded_frame(const uint8_t *frame, size_t len);
 static void app_link_log_bytes(const char *label, const uint8_t *data,
                                size_t len);
@@ -49,6 +62,8 @@ static void app_link_clear_uart_errors(UART_HandleTypeDef *huart);
 static void app_link_invalidate_rx_cache(size_t len);
 static bool app_link_dma_is_circular(void);
 static void app_link_kick_tx(void);
+static void app_link_process_chunk_ctx(link_decoder_t *ctx, const uint8_t *data,
+                                       size_t len);
 
 void app_link_get_last_send_error(app_link_send_err_t *err, uint32_t *status,
                                   uint32_t *hal_state, uint32_t *hal_err) {
@@ -267,11 +282,33 @@ void app_link_start(void) {
   s_uart_rx_last_pos = 0U;
   s_uart_rx_event_pending = 0U;
   s_uart_rx_pending_size = 0U;
+
+  /* Reset decoders */
+  s_uart_decoder.len = 0U;
+  s_cdc_decoder.len = 0U;
+}
+
+bool app_link_feed_cdc(const uint8_t *data, uint32_t len) {
+  if (data == NULL || len == 0U) {
+    return false;
+  }
+  /* Simple ring buffer push (ISR safe for single consumer) */
+  for (uint32_t i = 0; i < len; i++) {
+    size_t next = (s_cdc_rx_head + 1) % APP_LINK_CDC_BUFFER_BYTES;
+    if (next == s_cdc_rx_tail) {
+      s_link_overflows++;
+      return false; /* Buffer full */
+    }
+    s_cdc_rx_buffer[s_cdc_rx_head] = data[i];
+    s_cdc_rx_head = next;
+  }
+  return true;
 }
 
 void app_link_poll(void) {
+  /* 1. Process UART RX */
   if (APP_LINK_UART == NULL) {
-    return;
+    goto process_cdc;
   }
 
   if (app_link_dma_is_circular()) {
@@ -282,41 +319,55 @@ void app_link_poll(void) {
       pos = 0U;
     }
     if (pos == s_uart_rx_last_pos) {
-      return;
+      goto process_cdc;
     }
 
     app_link_invalidate_rx_cache(sizeof(s_uart_rx_buffer));
     if (pos > s_uart_rx_last_pos) {
-      app_link_process_chunk(&s_uart_rx_buffer[s_uart_rx_last_pos],
-                             pos - s_uart_rx_last_pos);
+      app_link_process_chunk_ctx(&s_uart_decoder,
+                                 &s_uart_rx_buffer[s_uart_rx_last_pos],
+                                 pos - s_uart_rx_last_pos);
     } else {
-      app_link_process_chunk(&s_uart_rx_buffer[s_uart_rx_last_pos],
-                             buf_size - s_uart_rx_last_pos);
+      app_link_process_chunk_ctx(&s_uart_decoder,
+                                 &s_uart_rx_buffer[s_uart_rx_last_pos],
+                                 buf_size - s_uart_rx_last_pos);
       if (pos > 0U) {
-        app_link_process_chunk(&s_uart_rx_buffer[0], pos);
+        app_link_process_chunk_ctx(&s_uart_decoder, &s_uart_rx_buffer[0], pos);
       }
     }
     s_uart_rx_last_pos = pos;
-    return;
+
+  } else if (s_uart_rx_event_pending) {
+    /* Idle line detection mode */
+    __disable_irq();
+    uint16_t size = s_uart_rx_pending_size;
+    s_uart_rx_pending_size = 0U;
+    s_uart_rx_event_pending = 0U;
+    __enable_irq();
+
+    if (size == 0U) {
+      goto process_cdc;
+    }
+
+    app_link_invalidate_rx_cache(size);
+    app_link_process_chunk_ctx(&s_uart_decoder, s_uart_rx_buffer, size);
+    app_link_restart_rx();
   }
 
-  if (!s_uart_rx_event_pending) {
-    return;
+process_cdc:
+  /* 2. Process CDC RX */
+  if (s_cdc_rx_head != s_cdc_rx_tail) {
+    /* Process in chunks to avoid holding up the loop too long */
+    uint32_t count = 0;
+    uint8_t chunk[64];
+    while (s_cdc_rx_head != s_cdc_rx_tail && count < sizeof(chunk)) {
+      chunk[count++] = s_cdc_rx_buffer[s_cdc_rx_tail];
+      s_cdc_rx_tail = (s_cdc_rx_tail + 1) % APP_LINK_CDC_BUFFER_BYTES;
+    }
+    if (count > 0) {
+      app_link_process_chunk_ctx(&s_cdc_decoder, chunk, count);
+    }
   }
-
-  __disable_irq();
-  uint16_t size = s_uart_rx_pending_size;
-  s_uart_rx_pending_size = 0U;
-  s_uart_rx_event_pending = 0U;
-  __enable_irq();
-
-  if (size == 0U) {
-    return;
-  }
-
-  app_link_invalidate_rx_cache(size);
-  app_link_process_chunk(s_uart_rx_buffer, size);
-  app_link_restart_rx();
 }
 
 static void app_link_restart_rx(void) {
@@ -333,31 +384,32 @@ static void app_link_restart_rx(void) {
   s_uart_rx_last_pos = 0U;
 }
 
-void app_link_process_chunk(const uint8_t *data, size_t len) {
+static void app_link_process_chunk_ctx(link_decoder_t *ctx, const uint8_t *data,
+                                       size_t len) {
   for (size_t i = 0; i < len; ++i) {
     uint8_t byte = data[i];
     if (byte == 0x00U) {
-      app_link_flush_frame();
-    } else if (s_cobs_frame_len < sizeof(s_cobs_frame_buffer)) {
-      s_cobs_frame_buffer[s_cobs_frame_len++] = byte;
+      app_link_flush_frame(ctx);
+    } else if (ctx->len < sizeof(ctx->buffer)) {
+      ctx->buffer[ctx->len++] = byte;
     } else {
       if (app_in_isr()) {
         s_link_overflows++;
       } else {
         APP_LOG_ERROR("UART frame overflow, dropping data");
       }
-      s_cobs_frame_len = 0U;
+      ctx->len = 0U;
     }
   }
 }
 
-static void app_link_flush_frame(void) {
-  if (s_cobs_frame_len == 0U) {
+static void app_link_flush_frame(link_decoder_t *ctx) {
+  if (ctx->len == 0U) {
     return;
   }
 
-  app_link_handle_encoded_frame(s_cobs_frame_buffer, s_cobs_frame_len);
-  s_cobs_frame_len = 0U;
+  app_link_handle_encoded_frame(ctx->buffer, ctx->len);
+  ctx->len = 0U;
 }
 
 static void app_link_handle_encoded_frame(const uint8_t *frame, size_t len) {

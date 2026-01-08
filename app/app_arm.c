@@ -32,6 +32,12 @@ bool app_try_arm_balancing(bool prepare_balance) {
 }
 
 void app_disarm_robot(void) {
+  /* Check if already disarmed to avoid spamming motor link */
+  if (motion_control_get_mode() == MOTION_MODE_DISARMED &&
+      s_motor_manual.enabled == 0U) {
+    return;
+  }
+
   s_motor_manual.enabled = 0U;
   s_motor_manual.left = 0.0f;
   s_motor_manual.right = 0.0f;

@@ -15,9 +15,13 @@
 #endif
 
 #ifndef MOTOR_LINK_DEBUG
-#define MOTOR_LINK_DEBUG 0
+#define MOTOR_LINK_DEBUG 1
 #endif
 #define ENABLE_MOTORS
+
+#ifndef APP_ENABLE_PROFILING
+#define APP_ENABLE_PROFILING 1
+#endif
 
 extern USBD_HandleTypeDef hUsbDeviceHS;
 extern UART_HandleTypeDef huart2;

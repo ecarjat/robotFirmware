@@ -41,7 +41,7 @@ void app_link_get_last_send_error(app_link_send_err_t *err, uint32_t *status,
 void app_link_start(void);
 void app_link_poll(void);
 void app_log_link_errors(void);
-void app_link_process_chunk(const uint8_t *data, size_t len);
+bool app_link_feed_cdc(const uint8_t *data, uint32_t len);
 bool app_link_send(uint8_t type, uint16_t flags, const uint8_t *payload,
                    uint16_t len, uint16_t seq_override);
 void app_link_debug_frame(const uint8_t *frame, size_t len);

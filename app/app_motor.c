@@ -5,6 +5,8 @@
 #include "motor_link.h"
 #include "robot_protocol.h"
 
+#define APP_MOTOR_MANUAL_PERIOD_MS 20U
+
 app_motor_manual_t s_motor_manual = {0U, 0.0f, 0.0f};
 
 void app_motor_manual_apply(void) {
@@ -12,6 +14,14 @@ void app_motor_manual_apply(void) {
   if (!s_motor_manual.enabled) {
     return;
   }
+
+  static uint32_t s_last_manual_ms = 0U;
+  uint32_t now = HAL_GetTick();
+  if ((now - s_last_manual_ms) < APP_MOTOR_MANUAL_PERIOD_MS) {
+    return;
+  }
+  s_last_manual_ms = now;
+
   float max_A = fabsf(g_robot_params.balance.IqMax);
   if (max_A <= 0.0f) {
     return;
