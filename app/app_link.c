@@ -1,6 +1,7 @@
 #include "app_link.h"
 #include "app_cmd.h"
 #include "app_config.h"
+#include "app_file.h"
 #include "app_rpc.h"
 #include "app_utils.h"
 #include "crc32.h"
@@ -658,6 +659,14 @@ void app_link_dispatch(const robot_frame_t *frame) {
 
   if (frame->hdr.type == ROBOT_MSG_RPC_REQ) {
     app_rpc_handle(frame);
+    return;
+  }
+
+  /* Handle FILE channel messages */
+  if (frame->hdr.type == ROBOT_MSG_FILE_LIST_REQ ||
+      frame->hdr.type == ROBOT_MSG_FILE_READ_REQ) {
+    app_file_handle_message(frame->hdr.type, frame->hdr.seq,
+                            frame->payload, frame->hdr.len);
     return;
   }
 

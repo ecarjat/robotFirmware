@@ -8,6 +8,7 @@
 #include "app_adc.h"
 #include "app_arm.h"
 #include "app_config.h"
+#include "app_file.h"
 #include "app_imu.h"
 #include "app_link.h"
 #include "app_main.h"
@@ -28,6 +29,10 @@
 
 #include "system_reboot.h"
 #include "usbd_cdc_if.h"
+
+#include "logging/blackbox.h"
+#include "logging/blackbox_dump.h"
+#include "qspi_w25q64.h"
 
 #define APP_HEARTBEAT_TIMEOUT_MS 200U
 #define APP_LOG_PERIOD_MS 500U
@@ -104,6 +109,15 @@ static void app_init(void) {
   if (param_rc != PARAM_OK && param_rc != PARAM_ERR_NOT_FOUND) {
     APP_LOG_ERROR("Param load error: %d", param_rc);
   }
+
+  /* Initialize blackbox logging */
+  qspi_w25q64_init();
+  log_init(&g_robot_params);
+  APP_LOG_INFO("Blackbox logging initialized (fields=0x%08lx)",
+               (unsigned long)g_robot_params.log_fields_mask);
+
+  /* Initialize file transfer */
+  app_file_init();
 
   motion_control_init();
 
@@ -261,6 +275,11 @@ static void app_idle_tick(void) {
     /* Update LED outputs */
     led_status_update(now);
   }
+
+  /* Blackbox logging background tasks */
+  log_writer_tick();
+  log_erase_tick();
+  log_dump_tick();
 }
 
 void app_cdc_handle_frame(const uint8_t *data, uint32_t len) {

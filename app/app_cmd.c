@@ -3,8 +3,11 @@
 #include "motion_control.h"
 #include "motor_link.h"
 #include "robot_protocol.h"
+#include "logging/blackbox_dump.h"
+#include "param_storage.h"
 
 extern uint8_t g_reboot_request;
+extern robot_params_t g_robot_params;
 static uint8_t s_last_teleop_flags = 0U;
 extern uint8_t g_estop_active;
 
@@ -23,6 +26,7 @@ void app_cmd_handler(uint8_t msg_type, const uint8_t *payload, size_t len,
     bool estop_rise = (rising & ROBOT_TELEOP_FLAG_ESTOP) != 0U;
     bool arm_rise = (rising & ROBOT_TELEOP_FLAG_ARM) != 0U;
     bool mode_cycle_rise = (rising & ROBOT_TELEOP_FLAG_MODE_CYCLE) != 0U;
+    bool dump_rise = (rising & ROBOT_TELEOP_FLAG_DUMP) != 0U;
     s_last_teleop_flags = flags;
 
     g_estop_active = estop ? 1U : 0U;
@@ -41,6 +45,16 @@ void app_cmd_handler(uint8_t msg_type, const uint8_t *payload, size_t len,
       }
       if (mode_cycle_rise) {
         APP_LOG_INFO("Teleop mode cycle requested (not implemented)");
+      }
+      if (dump_rise) {
+        uint32_t dump_seconds = g_robot_params.dump_seconds_default;
+        if (dump_seconds == 0U) {
+          dump_seconds = 30U;  /* Fallback default */
+        }
+        APP_LOG_INFO("Teleop dump requested (%u seconds)", (unsigned int)dump_seconds);
+        if (!log_dump_last_seconds(dump_seconds)) {
+          APP_LOG_ERROR("Dump rejected (already in progress or SD not ready)");
+        }
       }
       motion_control_set_teleop(cmd->vx_mps, cmd->wz_radps);
     }

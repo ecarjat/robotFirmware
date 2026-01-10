@@ -34,6 +34,8 @@ extern CRC_HandleTypeDef hcrc;
 
 #define APP_LOG_INFO(fmt, ...)                                                 \
   app_log_printf("[APP][INFO] " fmt "\r\n", ##__VA_ARGS__)
+#define APP_LOG_WARN(fmt, ...)                                                 \
+  app_log_printf("[APP][WARN] " fmt "\r\n", ##__VA_ARGS__)
 #define APP_LOG_ERROR(fmt, ...)                                                \
   app_log_printf("[APP][ERROR] " fmt "\r\n", ##__VA_ARGS__)
 

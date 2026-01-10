@@ -45,59 +45,37 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
 )
 
+# Collect all .c and .cpp files from app/ directory (including subdirectories)
+file(GLOB_RECURSE APP_C_SOURCES "app/*.c")
+file(GLOB_RECURSE APP_CPP_SOURCES "app/*.cpp")
+set(APP_SOURCES ${APP_C_SOURCES} ${APP_CPP_SOURCES})
+
+# Collect all .cpp files from control/ directory (including subdirectories)
+file(GLOB_RECURSE COMMON_CPP_SOURCES "common/*.c")
+
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    app/app_main.c
-    app/app_link.c
-    app/app_adc.c
-    app/app_arm.c
-    app/app_cmd.c
-    app/app_imu.c
-    app/app_motor.c
-    app/app_telem.c
-    app/app_profiling.c
-    app/app_rpc.c
-    common/crc32.c
-    common/framing_cobs.c
-    common/mux_channels.c
-    common/shared_protocol/robot_protocol.c
-    utils/log.c
-    control/MotionController.cpp
-    control/StateEstimator.cpp
-    control/ekf/BalancerEKF.cpp
-    control/motion_modes.cpp
-    control/motion_control.cpp
-    control/control_timer.c
-    drivers/imu/imu_bus.c
-    drivers/imu/imu_bmi270.c
-    drivers/imu/imu_bmm150.c
-    drivers/imu/imu_icm42688.c
-    drivers/imu/imu_exti.c
-    drivers/imu/imu_bus_sched.c
-    drivers/imu/imu_sched.c
-    drivers/motors/motor_link.c
-    drivers/motors/motor_link_framing.c
-    drivers/param_storage.c
-    drivers/system_reboot.c
-    drivers/spi_bus.c
-    drivers/debug_wdog.c
-    drivers/led_status.c
+    ${APP_SOURCES}
+    ${COMMON_CPP_SOURCES}
     libs/BMI270_SensorAPI/bmi2.c
     libs/BMI270_SensorAPI/bmi270.c
     libs/BMM150_SensorAPI/bmm150.c
 )
 
+# Collect all subdirectories of app/ that contain headers
+file(GLOB_RECURSE APP_HEADERS "app/*.h")
+set(APP_INCLUDE_DIRS "")
+foreach(HEADER ${APP_HEADERS})
+    get_filename_component(DIR ${HEADER} DIRECTORY)
+    list(APPEND APP_INCLUDE_DIRS ${DIR})
+endforeach()
+list(REMOVE_DUPLICATES APP_INCLUDE_DIRS)
+
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    app
+    ${APP_INCLUDE_DIRS}
     common
     common/shared_protocol
-    control
-    control/ekf
-    drivers
-    drivers/imu
-    drivers/motors
-    utils
     libs/BMI270_SensorAPI
     libs/BMM150_SensorAPI
     libs/TinyEKF

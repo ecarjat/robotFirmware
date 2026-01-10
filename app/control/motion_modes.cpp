@@ -5,6 +5,13 @@
 #include "config_control.h"
 #include "log.h"
 
+extern "C" {
+#include "../app/logging/blackbox_dump.h"
+#include "param_storage.h"
+}
+
+extern robot_params_t g_robot_params;
+
 #define MOTION_LOG_ERROR(fmt, ...) \
     app_log_printf("[APP][ERROR] " fmt "\r\n", ##__VA_ARGS__)
 
@@ -116,6 +123,15 @@ void motion_modes_step(const motion_modes_input_t *input, motion_modes_output_t 
             result.reset_pid = true;
             s_mode = mode;
             log_exit = (start_mode == MOTION_MODE_BALANCING);
+
+            /* Trigger blackbox dump on fall */
+            uint32_t dump_seconds = g_robot_params.dump_seconds_default;
+            if (dump_seconds == 0U) {
+                dump_seconds = 30U;  /* Fallback default */
+            }
+            if (!log_dump_last_seconds(dump_seconds)) {
+                MOTION_LOG_ERROR("Auto-dump failed (already in progress or SD not ready)");
+            }
         }
     }
 

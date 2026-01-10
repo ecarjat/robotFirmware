@@ -6,6 +6,7 @@
 #include "motion_modes.h"
 #include "stm32h7xx_hal.h"
 
+#include "../app/logging/blackbox_format.h"
 #include <string.h>
 
 /**
@@ -532,6 +533,10 @@ void param_storage_get_defaults(robot_params_t *params)
 
     /* ADC voltage divider */
     params->adc_voltage_multiplier = 1.0f; /* Default 1:1, no voltage division */
+
+    /* Blackbox logging */
+    params->log_fields_mask = LOG_FIELDS_MASK_DEFAULT; /* IMU, EKF, wheels, PID */
+    params->dump_seconds_default = 30U; /* 30 seconds default dump window */
 }
 
 int param_storage_erase(void)

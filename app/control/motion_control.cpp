@@ -21,6 +21,12 @@
 #include "imu_icm42688.h"
 #endif
 
+extern "C" {
+#include "../app/logging/blackbox.h"
+#include "../app/logging/blackbox_format.h"
+#include "crc32.h"
+}
+
 static RobotParams s_params;
 static MotionController s_controller(s_params);
 static StateEstimator s_estimator;
@@ -48,6 +54,9 @@ static float s_control_dt = CONTROL_DT;
 static float s_last_iq_left = 0.0f;
 static float s_last_iq_right = 0.0f;
 static bool s_output_enabled = true;
+
+/* Blackbox logging */
+static uint32_t s_log_seq = 0U;
 
 #if SENSOR_ENABLE_BMI270
 static imu_bmi270_sample_t s_bmi_latest;
@@ -454,6 +463,108 @@ void motion_control_tick(uint32_t now_ms)
             motor_link_set_wheel_Iq(0.0f, 0.0f, 0.0f);
         }
     }
+
+    /* Blackbox logging */
+    LogRecord rec;
+    memset(&rec, 0, sizeof(rec));
+
+    /* Header */
+    rec.magic = LOG_RECORD_MAGIC;
+    rec.version = LOG_RECORD_VERSION;
+    rec.seq = s_log_seq++;
+    rec.t_us = now_ms * 1000U;
+
+    /* Get IMU health metrics for active sensor */
+    ImuHealthMetrics health_metrics;
+    bool health_valid = s_estimator.getImuHealthMetrics(health_metrics);
+    rec.active_imu = health_valid ? health_metrics.active_sensor : 0;
+
+    /* Flags */
+    rec.flags = 0;
+    if (health_valid && health_metrics.gate_accel) {
+        rec.flags |= LOGF_REC_ACCEL_GATED;
+    }
+    if (health_valid && health_metrics.active_sensor == 1) {
+        rec.flags |= LOGF_REC_IMU_FALLBACK;
+    }
+    if (s_controller.isOutputSaturated()) {
+        rec.flags |= LOGF_REC_UL_SAT | LOGF_REC_UR_SAT;
+    }
+    motion_mode_t mode = motion_modes_get();
+    if (mode == MOTION_MODE_FALLEN) {
+        rec.flags |= LOGF_REC_FALLEN;
+    }
+    if (mode == MOTION_MODE_BALANCING) {
+        rec.flags |= LOGF_REC_ARMED;
+    }
+
+    uint32_t mask = g_robot_params.log_fields_mask;
+
+    /* IMU raw data (LOGF_IMU_RAW) */
+    if (mask & LOGF_IMU_RAW) {
+#if SENSOR_ENABLE_BMI270
+        if (s_bmi_have && health_valid && health_metrics.active_sensor == 0) {
+            rec.acc_raw[0] = s_bmi_latest.accel[0];
+            rec.acc_raw[1] = s_bmi_latest.accel[1];
+            rec.acc_raw[2] = s_bmi_latest.accel[2];
+            rec.gyro_raw[0] = s_bmi_latest.gyro[0];
+            rec.gyro_raw[1] = s_bmi_latest.gyro[1];
+            rec.gyro_raw[2] = s_bmi_latest.gyro[2];
+        }
+#endif
+#if SENSOR_ENABLE_ICM42688
+        if (s_icm_have && health_valid && health_metrics.active_sensor == 1) {
+            rec.acc_raw[0] = s_icm_latest.accel[0];
+            rec.acc_raw[1] = s_icm_latest.accel[1];
+            rec.acc_raw[2] = s_icm_latest.accel[2];
+            rec.gyro_raw[0] = s_icm_latest.gyro[0];
+            rec.gyro_raw[1] = s_icm_latest.gyro[1];
+            rec.gyro_raw[2] = s_icm_latest.gyro[2];
+        }
+#endif
+    }
+
+    /* Dual-IMU health metrics (LOGF_IMU2_HEALTH) */
+    if ((mask & LOGF_IMU2_HEALTH) && health_valid) {
+        rec.gyro_diff_dps = health_metrics.gyro_pitch_diff_dps;
+        rec.acc_angle_deg = health_metrics.acc_angle_diff_deg;
+        rec.vib_grms = health_metrics.vib_rms_g;
+    }
+
+    /* EKF state (LOGF_EKF) */
+    if (mask & LOGF_EKF) {
+        rec.theta_rad = estimate.theta;
+        rec.thetaDot_rads = estimate.thetaDot;
+        rec.gyro_bias_rads = estimate.gyroBias;
+        rec.x_m = estimate.x;
+        rec.x_dot_mps = estimate.xDot;
+    }
+
+    /* Wheel velocities (LOGF_WHEELS) */
+    if (mask & LOGF_WHEELS) {
+        rec.wL_rads = left_w;
+        rec.wR_rads = right_w;
+        rec.v_mps = v_enc;
+    }
+
+    /* PID controller internals (LOGF_PID) */
+    if (mask & LOGF_PID) {
+        rec.theta_ref_rad = s_controller.getLastPitchTarget();
+        rec.e_theta_rad = s_controller.getLastPitchError();
+        rec.P = s_controller.getLastPitchP();
+        rec.I = s_controller.getLastPitchI();
+        rec.D = s_controller.getLastPitchD();
+        rec.u_common = 0.0f;  /* Not tracked separately */
+        rec.u_turn = 0.0f;    /* Not tracked separately */
+        rec.uL_cmd = s_last_iq_left;
+        rec.uR_cmd = s_last_iq_right;
+    }
+
+    /* Compute CRC */
+    rec.crc32 = robot_crc32((const uint8_t *)&rec, sizeof(LogRecord) - sizeof(uint32_t));
+
+    /* Push to blackbox */
+    log_push_record(&rec);
 }
 
 bool motion_control_get_yaw_debug(float *gyro_z, float *yaw_rate_enc, float *yaw_rate)

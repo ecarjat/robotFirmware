@@ -55,6 +55,7 @@ I2C_HandleTypeDef hi2c1;
 IWDG_HandleTypeDef hiwdg1;
 
 OSPI_HandleTypeDef hospi1;
+MDMA_HandleTypeDef hmdma_octospi1_fifo_th;
 
 SD_HandleTypeDef hsd1;
 
@@ -99,6 +100,7 @@ static void MPU_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_BDMA_Init(void);
+static void MX_MDMA_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_OCTOSPI1_Init(void);
 static void MX_SDMMC1_SD_Init(void);
@@ -116,8 +118,8 @@ static void MX_UART4_Init(void);
 static void MX_SPI6_Init(void);
 static void MX_CRC_Init(void);
 static void MX_IWDG1_Init(void);
-static void MX_TIM2_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_TIM2_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -184,6 +186,7 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_BDMA_Init();
+  MX_MDMA_Init();
   MX_I2C1_Init();
   MX_OCTOSPI1_Init();
   MX_SDMMC1_SD_Init();
@@ -203,8 +206,8 @@ int main(void)
   MX_SPI6_Init();
   MX_CRC_Init();
   MX_IWDG1_Init();
-  MX_TIM2_Init();
   MX_ADC1_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
   WDOG_CHECKPOINT(WDOG_CP_IWDG_INIT);
 
@@ -561,15 +564,15 @@ static void MX_OCTOSPI1_Init(void)
   /* USER CODE END OCTOSPI1_Init 1 */
   /* OCTOSPI1 parameter configuration*/
   hospi1.Instance = OCTOSPI1;
-  hospi1.Init.FifoThreshold = 1;
+  hospi1.Init.FifoThreshold = 16;
   hospi1.Init.DualQuad = HAL_OSPI_DUALQUAD_DISABLE;
-  hospi1.Init.MemoryType = HAL_OSPI_MEMTYPE_MACRONIX;
-  hospi1.Init.DeviceSize = 22;
+  hospi1.Init.MemoryType = HAL_OSPI_MEMTYPE_MICRON;
+  hospi1.Init.DeviceSize = 23;
   hospi1.Init.ChipSelectHighTime = 2;
   hospi1.Init.FreeRunningClock = HAL_OSPI_FREERUNCLK_DISABLE;
   hospi1.Init.ClockMode = HAL_OSPI_CLOCK_MODE_0;
   hospi1.Init.WrapSize = HAL_OSPI_WRAP_NOT_SUPPORTED;
-  hospi1.Init.ClockPrescaler = 4;
+  hospi1.Init.ClockPrescaler = 1;
   hospi1.Init.SampleShifting = HAL_OSPI_SAMPLE_SHIFTING_HALFCYCLE;
   hospi1.Init.DelayHoldQuarterCycle = HAL_OSPI_DHQC_DISABLE;
   hospi1.Init.ChipSelectBoundary = 0;
@@ -1337,6 +1340,23 @@ static void MX_DMA_Init(void)
   /* DMA2_Stream7_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream7_IRQn);
+
+}
+
+/**
+  * Enable MDMA controller clock
+  */
+static void MX_MDMA_Init(void)
+{
+
+  /* MDMA controller clock enable */
+  __HAL_RCC_MDMA_CLK_ENABLE();
+  /* Local variables */
+
+  /* MDMA interrupt initialization */
+  /* MDMA_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(MDMA_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(MDMA_IRQn);
 
 }
 

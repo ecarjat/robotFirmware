@@ -23,6 +23,8 @@
 /* USER CODE BEGIN Includes */
 
 /* USER CODE END Includes */
+extern MDMA_HandleTypeDef hmdma_octospi1_fifo_th;
+
 extern DMA_HandleTypeDef hdma_spi6_rx;
 
 extern DMA_HandleTypeDef hdma_spi6_tx;
@@ -366,6 +368,35 @@ void HAL_OSPI_MspInit(OSPI_HandleTypeDef* hospi)
     GPIO_InitStruct.Alternate = GPIO_AF10_OCTOSPIM_P1;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+    /* OCTOSPI1 MDMA Init */
+    /* OCTOSPI1_FIFO_TH Init */
+    hmdma_octospi1_fifo_th.Instance = MDMA_Channel0;
+    hmdma_octospi1_fifo_th.Init.Request = MDMA_REQUEST_OCTOSPI1_FIFO_TH;
+    hmdma_octospi1_fifo_th.Init.TransferTriggerMode = MDMA_BUFFER_TRANSFER;
+    hmdma_octospi1_fifo_th.Init.Priority = MDMA_PRIORITY_LOW;
+    hmdma_octospi1_fifo_th.Init.Endianness = MDMA_LITTLE_ENDIANNESS_PRESERVE;
+    hmdma_octospi1_fifo_th.Init.SourceInc = MDMA_SRC_INC_DOUBLEWORD;
+    hmdma_octospi1_fifo_th.Init.DestinationInc = MDMA_DEST_DEC_WORD;
+    hmdma_octospi1_fifo_th.Init.SourceDataSize = MDMA_SRC_DATASIZE_WORD;
+    hmdma_octospi1_fifo_th.Init.DestDataSize = MDMA_DEST_DATASIZE_WORD;
+    hmdma_octospi1_fifo_th.Init.DataAlignment = MDMA_DATAALIGN_PACKENABLE;
+    hmdma_octospi1_fifo_th.Init.BufferTransferLength = 1;
+    hmdma_octospi1_fifo_th.Init.SourceBurst = MDMA_SOURCE_BURST_SINGLE;
+    hmdma_octospi1_fifo_th.Init.DestBurst = MDMA_DEST_BURST_SINGLE;
+    hmdma_octospi1_fifo_th.Init.SourceBlockAddressOffset = 0;
+    hmdma_octospi1_fifo_th.Init.DestBlockAddressOffset = 0;
+    if (HAL_MDMA_Init(&hmdma_octospi1_fifo_th) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    if (HAL_MDMA_ConfigPostRequestMask(&hmdma_octospi1_fifo_th, 0, 0) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    __HAL_LINKDMA(hospi,hmdma,hmdma_octospi1_fifo_th);
+
     /* OCTOSPI1 interrupt Init */
     HAL_NVIC_SetPriority(OCTOSPI1_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(OCTOSPI1_IRQn);
@@ -407,6 +438,9 @@ void HAL_OSPI_MspDeInit(OSPI_HandleTypeDef* hospi)
     HAL_GPIO_DeInit(GPIOB, GPIO_PIN_2|GPIO_PIN_6);
 
     HAL_GPIO_DeInit(GPIOD, GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_13);
+
+    /* OCTOSPI1 MDMA DeInit */
+    HAL_MDMA_DeInit(hospi->hmdma);
 
     /* OCTOSPI1 interrupt DeInit */
     HAL_NVIC_DisableIRQ(OCTOSPI1_IRQn);

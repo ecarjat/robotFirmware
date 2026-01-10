@@ -82,6 +82,7 @@ void USART6_IRQHandler(void);
 void OTG_HS_IRQHandler(void);
 void SPI6_IRQHandler(void);
 void OCTOSPI1_IRQHandler(void);
+void MDMA_IRQHandler(void);
 void BDMA_Channel0_IRQHandler(void);
 void BDMA_Channel1_IRQHandler(void);
 /* USER CODE BEGIN EFP */

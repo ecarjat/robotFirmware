@@ -40,7 +40,7 @@ extern "C" {
  */
 
 #define PARAM_MAGIC             0x524F424FUL  /* 'ROBO' */
-#define PARAM_VERSION           6U
+#define PARAM_VERSION           7U
 #define PARAM_FLASH_BASE        0x080C0000UL
 #define PARAM_FLASH_SIZE        0x00020000UL  /* 128 KB */
 #define PARAM_FLASH_END         (PARAM_FLASH_BASE + PARAM_FLASH_SIZE)
@@ -134,8 +134,12 @@ typedef struct {
     /* ADC voltage divider (PC4) */
     float adc_voltage_multiplier; /* Voltage divider multiplier for ADC on PC4 */
 
+    /* Blackbox logging configuration */
+    uint32_t log_fields_mask;        /* Bitmask of LOGF_* flags for conditional logging */
+    uint16_t dump_seconds_default;   /* Default dump window in seconds (e.g., 30) */
+
     /* Reserved for future use */
-    uint8_t  reserved[12];
+    uint8_t  reserved[6];
 } robot_params_t;
 
 /**
