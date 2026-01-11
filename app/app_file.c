@@ -4,6 +4,7 @@
 #include "motion_control.h"
 #include "robot_protocol.h"
 #include "ff.h"
+#include "fatfs.h"
 #include <string.h>
 
 /* File transfer state - only one operation at a time */
@@ -195,6 +196,19 @@ static bool app_file_handle_read(uint16_t seq, const uint8_t *payload, uint16_t 
 void app_file_init(void)
 {
     s_file_ctx.busy = false;
+    if (retSD != 0U) {
+        APP_LOG_ERROR("SD driver link failed (err=%u)", (unsigned int)retSD);
+    } else {
+        FRESULT res = f_mount(&SDFatFS, (TCHAR const *)SDPath, 1);
+        if (res != FR_OK) {
+            APP_LOG_ERROR("SD mount failed (err=%d)", res);
+            retSD = (uint8_t)res;
+        } else {
+            APP_LOG_INFO("SD mount OK");
+            retSD = 0U;
+        }
+    }
+
     APP_LOG_INFO("File transfer initialized");
 }
 

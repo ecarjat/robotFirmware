@@ -15,7 +15,7 @@
 #endif
 
 #ifndef MOTOR_LINK_DEBUG
-#define MOTOR_LINK_DEBUG 1
+#define MOTOR_LINK_DEBUG 0
 #endif
 #define ENABLE_MOTORS
 

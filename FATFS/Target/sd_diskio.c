@@ -210,41 +210,26 @@ DRESULT SD_read(BYTE lun, BYTE *buff, DWORD sector, UINT count)
   if (!((uint32_t)buff & 0x1F))
   {
 #endif
-    if(BSP_SD_ReadBlocks_DMA((uint32_t*)buff,
-                             (uint32_t) (sector),
-                             count) == MSD_OK)
+    if(BSP_SD_ReadBlocks((uint32_t*)buff,
+                         (uint32_t) (sector),
+                         count,
+                         SD_TIMEOUT) == MSD_OK)
     {
-      ReadStatus = 0;
-      /* Wait that the reading process is completed or a timeout occurs */
       timeout = HAL_GetTick();
-      while((ReadStatus == 0) && ((HAL_GetTick() - timeout) < SD_TIMEOUT))
+      while((HAL_GetTick() - timeout) < SD_TIMEOUT)
       {
-      }
-      /* in case of a timeout return error */
-      if (ReadStatus == 0)
-      {
-        res = RES_ERROR;
-      }
-      else
-      {
-        ReadStatus = 0;
-        timeout = HAL_GetTick();
-
-        while((HAL_GetTick() - timeout) < SD_TIMEOUT)
+        if (BSP_SD_GetCardState() == SD_TRANSFER_OK)
         {
-          if (BSP_SD_GetCardState() == SD_TRANSFER_OK)
-          {
-            res = RES_OK;
+          res = RES_OK;
 #if (ENABLE_SD_DMA_CACHE_MAINTENANCE == 1)
-            /*
-            the SCB_InvalidateDCache_by_Addr() requires a 32-Byte aligned address,
-            adjust the address and the D-Cache size to invalidate accordingly.
-            */
-            alignedAddr = (uint32_t)buff & ~0x1F;
-            SCB_InvalidateDCache_by_Addr((uint32_t*)alignedAddr, count*BLOCKSIZE + ((uint32_t)buff - alignedAddr));
+          /*
+          the SCB_InvalidateDCache_by_Addr() requires a 32-Byte aligned address,
+          adjust the address and the D-Cache size to invalidate accordingly.
+          */
+          alignedAddr = (uint32_t)buff & ~0x1F;
+          SCB_InvalidateDCache_by_Addr((uint32_t*)alignedAddr, count*BLOCKSIZE + ((uint32_t)buff - alignedAddr));
 #endif
-            break;
-          }
+          break;
         }
       }
     }
@@ -256,20 +241,18 @@ DRESULT SD_read(BYTE lun, BYTE *buff, DWORD sector, UINT count)
       int i;
 
       for (i = 0; i < count; i++) {
-        ret = BSP_SD_ReadBlocks_DMA((uint32_t*)scratch, (uint32_t)sector++, 1);
+        ret = BSP_SD_ReadBlocks((uint32_t*)scratch, (uint32_t)sector++, 1, SD_TIMEOUT);
         if (ret == MSD_OK) {
           /* wait until the read is successful or a timeout occurs */
 
           timeout = HAL_GetTick();
-          while((ReadStatus == 0) && ((HAL_GetTick() - timeout) < SD_TIMEOUT))
+          while((HAL_GetTick() - timeout) < SD_TIMEOUT)
           {
+            if (BSP_SD_GetCardState() == SD_TRANSFER_OK)
+            {
+              break;
+            }
           }
-          if (ReadStatus == 0)
-          {
-            res = RES_ERROR;
-            break;
-          }
-          ReadStatus = 0;
 
 #if (ENABLE_SD_DMA_CACHE_MAINTENANCE == 1)
           /*
@@ -341,33 +324,19 @@ DRESULT SD_write(BYTE lun, const BYTE *buff, DWORD sector, UINT count)
     SCB_CleanDCache_by_Addr((uint32_t*)alignedAddr, count*BLOCKSIZE + ((uint32_t)buff - alignedAddr));
 #endif
 
-    if(BSP_SD_WriteBlocks_DMA((uint32_t*)buff,
-                              (uint32_t)(sector),
-                              count) == MSD_OK)
+    if(BSP_SD_WriteBlocks((uint32_t*)buff,
+                          (uint32_t)(sector),
+                          count,
+                          SD_TIMEOUT) == MSD_OK)
     {
       /* Wait that writing process is completed or a timeout occurs */
-
       timeout = HAL_GetTick();
-      while((WriteStatus == 0) && ((HAL_GetTick() - timeout) < SD_TIMEOUT))
+      while((HAL_GetTick() - timeout) < SD_TIMEOUT)
       {
-      }
-      /* in case of a timeout return error */
-      if (WriteStatus == 0)
-      {
-        res = RES_ERROR;
-      }
-      else
-      {
-        WriteStatus = 0;
-        timeout = HAL_GetTick();
-
-        while((HAL_GetTick() - timeout) < SD_TIMEOUT)
+        if (BSP_SD_GetCardState() == SD_TRANSFER_OK)
         {
-          if (BSP_SD_GetCardState() == SD_TRANSFER_OK)
-          {
-            res = RES_OK;
-            break;
-          }
+          res = RES_OK;
+          break;
         }
       }
     }
@@ -385,23 +354,20 @@ DRESULT SD_write(BYTE lun, const BYTE *buff, DWORD sector, UINT count)
 
       for (i = 0; i < count; i++)
       {
-        WriteStatus = 0;
-
         memcpy((void *)scratch, (void *)buff, BLOCKSIZE);
         buff += BLOCKSIZE;
 
-        ret = BSP_SD_WriteBlocks_DMA((uint32_t*)scratch, (uint32_t)sector++, 1);
+        ret = BSP_SD_WriteBlocks((uint32_t*)scratch, (uint32_t)sector++, 1, SD_TIMEOUT);
         if (ret == MSD_OK) {
-          /* wait for a message from the queue or a timeout */
+          /* wait for transfer completion or a timeout */
           timeout = HAL_GetTick();
-          while((WriteStatus == 0) && ((HAL_GetTick() - timeout) < SD_TIMEOUT))
+          while((HAL_GetTick() - timeout) < SD_TIMEOUT)
           {
+            if (BSP_SD_GetCardState() == SD_TRANSFER_OK)
+            {
+              break;
+            }
           }
-          if (WriteStatus == 0)
-          {
-            break;
-          }
-
         }
         else
         {
