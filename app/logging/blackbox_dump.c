@@ -1,5 +1,6 @@
 #include "blackbox_dump.h"
 
+#include "app_config.h"
 #include "blackbox.h"
 #include "blackbox_format.h"
 #include "crc32.h"
@@ -40,15 +41,24 @@ static struct {
   uint32_t bytes_written;    /* Total bytes written to SD */
   char filename[16];         /* DUMP_nnnn.BIN */
   uint32_t last_dump_id;     /* Dump file counter */
-} s_dump_ctx;
+} s_dump_ctx __attribute__((section(".dma_buffer"), aligned(32)));
+
+static LogMeta s_dump_meta __attribute__((section(".dma_buffer"), aligned(32)));
+static LogDumpTrailer s_dump_trailer __attribute__((section(".dma_buffer"), aligned(32)));
+static bool s_dump_ctx_initialized = false;
 
 /* Internal functions */
+static const char *dump_state_name(dump_state_t state);
 static void dump_reset_context(void);
 static bool dump_calculate_window(uint32_t seconds);
 static bool dump_generate_filename(void);
 static void dump_advance_state(dump_state_t next_state);
 
 bool log_dump_last_seconds(uint32_t seconds) {
+  if (!s_dump_ctx_initialized) {
+    dump_reset_context();
+    s_dump_ctx_initialized = true;
+  }
   /* Check if already dumping */
   if (s_dump_ctx.state != DUMP_IDLE) {
     return false;
@@ -92,6 +102,8 @@ void log_dump_tick(void) {
       res = f_open(&s_dump_ctx.file, s_dump_ctx.filename,
                    FA_CREATE_ALWAYS | FA_WRITE);
       if (res != FR_OK) {
+        APP_LOG_ERROR("Dump open failed for %s (err=%d)",
+                      s_dump_ctx.filename, res);
         dump_reset_context();
         break;
       }
@@ -101,27 +113,31 @@ void log_dump_tick(void) {
     case DUMP_WRITING_META:
       /* Write metadata snapshot to file */
       {
-        LogMeta meta;
-        memset(&meta, 0, sizeof(meta));
+        memset(&s_dump_meta, 0, sizeof(s_dump_meta));
 
         /* Populate meta (snapshot of current state) */
-        memcpy(meta.magic, LOG_META_MAGIC, 8);
-        meta.version = LOG_META_VERSION;
-        meta.record_size = LOG_RECORD_SIZE;
-        meta.rate_hz = 400;
-        meta.log_fields_mask = 0;  /* TODO: Get from blackbox */
-        meta.ring_start = LOG_RING_START;
-        meta.ring_size = LOG_RING_SIZE;
-        meta.write_addr = log_get_write_addr();
-        meta.wrap_count = 0;  /* Not used in dump */
-        meta.boot_count = 0;  /* Not used in dump */
-        meta.last_dump_id = s_dump_ctx.last_dump_id;
-        meta.sequence = 0;  /* Not used in dump */
-        meta.meta_crc32 =
-            robot_crc32((const uint8_t *)&meta, sizeof(LogMeta) - sizeof(uint32_t));
+        memcpy(s_dump_meta.magic, LOG_META_MAGIC, 8);
+        s_dump_meta.version = LOG_META_VERSION;
+        s_dump_meta.record_size = LOG_RECORD_SIZE;
+        s_dump_meta.rate_hz = 400;
+        s_dump_meta.log_fields_mask = 0;  /* TODO: Get from blackbox */
+        s_dump_meta.ring_start = LOG_RING_START;
+        s_dump_meta.ring_size = LOG_RING_SIZE;
+        s_dump_meta.write_addr = log_get_write_addr();
+        s_dump_meta.wrap_count = 0;  /* Not used in dump */
+        s_dump_meta.boot_count = 0;  /* Not used in dump */
+        s_dump_meta.last_dump_id = s_dump_ctx.last_dump_id;
+        s_dump_meta.sequence = 0;  /* Not used in dump */
+        s_dump_meta.meta_crc32 =
+            robot_crc32((const uint8_t *)&s_dump_meta,
+                        sizeof(LogMeta) - sizeof(uint32_t));
 
-        res = f_write(&s_dump_ctx.file, &meta, sizeof(LogMeta), &bytes_written);
+        res = f_write(&s_dump_ctx.file, &s_dump_meta, sizeof(LogMeta),
+                      &bytes_written);
         if (res != FR_OK || bytes_written != sizeof(LogMeta)) {
+          APP_LOG_ERROR("Dump meta write failed (err=%d, wrote=%u/%u)",
+                        res, (unsigned int)bytes_written,
+                        (unsigned int)sizeof(LogMeta));
           f_close(&s_dump_ctx.file);
           dump_reset_context();
           break;
@@ -191,6 +207,9 @@ void log_dump_tick(void) {
 
         res = f_write(&s_dump_ctx.file, s_dump_buffer, chunk_size, &bytes_written);
         if (res != FR_OK || bytes_written != chunk_size) {
+          APP_LOG_ERROR("Dump data write failed (err=%d, wrote=%u/%u)",
+                        res, (unsigned int)bytes_written,
+                        (unsigned int)chunk_size);
           f_close(&s_dump_ctx.file);
           dump_reset_context();
           break;
@@ -210,15 +229,17 @@ void log_dump_tick(void) {
     case DUMP_FINALIZING:
       /* Write dump trailer and close file */
       {
-        LogDumpTrailer trailer;
-        trailer.start_seq = s_dump_ctx.start_seq;
-        trailer.end_seq = s_dump_ctx.end_seq;
-        trailer.record_count = s_dump_ctx.record_count;
-        trailer.dump_crc32 = 0;  /* CRC not computed (would need incremental API) */
+        s_dump_trailer.start_seq = s_dump_ctx.start_seq;
+        s_dump_trailer.end_seq = s_dump_ctx.end_seq;
+        s_dump_trailer.record_count = s_dump_ctx.record_count;
+        s_dump_trailer.dump_crc32 = 0;  /* CRC not computed (would need incremental API) */
 
-        res = f_write(&s_dump_ctx.file, &trailer, sizeof(LogDumpTrailer),
-                      &bytes_written);
+        res = f_write(&s_dump_ctx.file, &s_dump_trailer,
+                      sizeof(LogDumpTrailer), &bytes_written);
         if (res != FR_OK || bytes_written != sizeof(LogDumpTrailer)) {
+          APP_LOG_ERROR("Dump trailer write failed (err=%d, wrote=%u/%u)",
+                        res, (unsigned int)bytes_written,
+                        (unsigned int)sizeof(LogDumpTrailer));
           f_close(&s_dump_ctx.file);
           dump_reset_context();
           break;
@@ -227,8 +248,19 @@ void log_dump_tick(void) {
         s_dump_ctx.bytes_written += bytes_written;
 
         /* Sync and close */
-        f_sync(&s_dump_ctx.file);
-        f_close(&s_dump_ctx.file);
+        res = f_sync(&s_dump_ctx.file);
+        if (res != FR_OK) {
+          APP_LOG_ERROR("Dump sync failed (err=%d)", res);
+          f_close(&s_dump_ctx.file);
+          dump_reset_context();
+          break;
+        }
+        res = f_close(&s_dump_ctx.file);
+        if (res != FR_OK) {
+          APP_LOG_ERROR("Dump close failed (err=%d)", res);
+          dump_reset_context();
+          break;
+        }
 
         dump_advance_state(DUMP_DONE);
       }
@@ -258,6 +290,7 @@ bool log_get_dump_stats(uint32_t *records_written, uint32_t *bytes_written) {
 /* Internal functions */
 
 static void dump_reset_context(void) {
+  APP_LOG_WARN("Dump reset (was in state %s)", dump_state_name(s_dump_ctx.state));
   memset(&s_dump_ctx, 0, sizeof(s_dump_ctx));
   s_dump_ctx.state = DUMP_IDLE;
 }
@@ -314,6 +347,21 @@ static bool dump_generate_filename(void) {
   return true;
 }
 
+static const char *dump_state_name(dump_state_t state) {
+  switch (state) {
+    case DUMP_IDLE: return "IDLE";
+    case DUMP_OPENING_FILE: return "OPENING_FILE";
+    case DUMP_WRITING_META: return "WRITING_META";
+    case DUMP_READING_QSPI: return "READING_QSPI";
+    case DUMP_WRITING_SD: return "WRITING_SD";
+    case DUMP_FINALIZING: return "FINALIZING";
+    case DUMP_DONE: return "DONE";
+    default: return "UNKNOWN";
+  }
+}
+
 static void dump_advance_state(dump_state_t next_state) {
+  APP_LOG_INFO("Dump: %s -> %s", dump_state_name(s_dump_ctx.state),
+               dump_state_name(next_state));
   s_dump_ctx.state = next_state;
 }

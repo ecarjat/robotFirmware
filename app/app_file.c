@@ -12,6 +12,10 @@ static struct {
     bool busy;
 } s_file_ctx;
 
+static FIL s_file_handle __attribute__((section(".dma_buffer"), aligned(32)));
+static uint8_t s_file_resp_buf[ROBOT_FRAME_MAX_PAYLOAD]
+    __attribute__((section(".dma_buffer"), aligned(32)));
+
 /**
  * @brief Check if file transfer is safe (robot must not be balancing)
  * @return true if safe to transfer files
@@ -127,7 +131,12 @@ static bool app_file_handle_read(uint16_t seq, const uint8_t *payload, uint16_t 
     }
 
     /* Validate request */
-    if (req->length == 0U || req->length > ROBOT_FILE_CHUNK_SIZE) {
+    uint16_t req_len = req->length;
+    if (req_len == 0U) {
+        /* Backward-compat: treat 0 as "default max chunk". */
+        req_len = ROBOT_FILE_CHUNK_SIZE;
+    }
+    if (req_len > ROBOT_FILE_CHUNK_SIZE) {
         APP_LOG_ERROR("Invalid chunk size: %u", (unsigned int)req->length);
         return app_file_send_error(seq, ROBOT_FILE_ERR_INVALID_REQ, req->filename);
     }
@@ -138,48 +147,50 @@ static bool app_file_handle_read(uint16_t seq, const uint8_t *payload, uint16_t 
     filename[ROBOT_FILE_MAX_FILENAME] = '\0';
 
     /* Open file */
-    FIL file;
-    FRESULT res = f_open(&file, filename, FA_READ);
+    FIL *file = &s_file_handle;
+    memset(file, 0, sizeof(*file));
+    FRESULT res = f_open(file, filename, FA_READ);
     if (res != FR_OK) {
         APP_LOG_ERROR("Failed to open '%s' (err=%d)", filename, res);
         return app_file_send_error(seq, ROBOT_FILE_ERR_NOT_FOUND, req->filename);
     }
 
-    uint32_t total_size = f_size(&file);
+    uint32_t total_size = f_size(file);
 
     /* Validate offset */
     if (req->offset >= total_size) {
-        f_close(&file);
+        f_close(file);
         APP_LOG_ERROR("Invalid offset %lu >= %lu", (unsigned long)req->offset, (unsigned long)total_size);
         return app_file_send_error(seq, ROBOT_FILE_ERR_INVALID_REQ, req->filename);
     }
 
     /* Seek to offset */
     if (req->offset > 0U) {
-        res = f_lseek(&file, req->offset);
+        res = f_lseek(file, req->offset);
         if (res != FR_OK) {
-            f_close(&file);
+            f_close(file);
             APP_LOG_ERROR("Seek failed (err=%d)", res);
             return app_file_send_error(seq, ROBOT_FILE_ERR_READ_ERROR, req->filename);
         }
     }
 
     /* Build response */
-    uint8_t resp_buf[ROBOT_FRAME_MAX_PAYLOAD];
+    uint8_t *resp_buf = s_file_resp_buf;
+    const uint16_t resp_cap = (uint16_t)sizeof(s_file_resp_buf);
     robot_file_read_resp_t *resp = (robot_file_read_resp_t *)resp_buf;
     resp->offset = req->offset;
     resp->total_size = total_size;
 
     /* Read chunk */
     UINT bytes_read = 0;
-    uint16_t chunk_max = req->length;
+    uint16_t chunk_max = req_len;
     /* Ensure response fits in frame */
-    if (sizeof(robot_file_read_resp_t) + chunk_max > sizeof(resp_buf)) {
-        chunk_max = sizeof(resp_buf) - sizeof(robot_file_read_resp_t);
+    if (sizeof(robot_file_read_resp_t) + chunk_max > resp_cap) {
+        chunk_max = resp_cap - sizeof(robot_file_read_resp_t);
     }
 
-    res = f_read(&file, resp_buf + sizeof(robot_file_read_resp_t), chunk_max, &bytes_read);
-    f_close(&file);
+    res = f_read(file, resp_buf + sizeof(robot_file_read_resp_t), chunk_max, &bytes_read);
+    f_close(file);
 
     if (res != FR_OK) {
         APP_LOG_ERROR("Read failed (err=%d)", res);
@@ -189,8 +200,27 @@ static bool app_file_handle_read(uint16_t seq, const uint8_t *payload, uint16_t 
     resp->chunk_len = (uint16_t)bytes_read;
     uint16_t total_len = sizeof(robot_file_read_resp_t) + resp->chunk_len;
 
-    return app_link_send(ROBOT_MSG_FILE_READ_RESP, ROBOT_FLAG_ACK_REQ,
-                         resp_buf, total_len, seq);
+    if (req->offset == 0U) {
+        APP_LOG_INFO("FILE_READ_RESP '%s' size=%lu chunk=%u resp_len=%u hdr_len=%u",
+                     filename, (unsigned long)total_size, (unsigned int)bytes_read,
+                     (unsigned int)total_len,
+                     (unsigned int)sizeof(robot_file_read_resp_t));
+    }
+
+    bool ok = app_link_send(ROBOT_MSG_FILE_READ_RESP, ROBOT_FLAG_ACK_REQ,
+                            resp_buf, total_len, seq);
+    if (!ok && req->offset == 0U) {
+        app_link_send_err_t err;
+        uint32_t status = 0U;
+        uint32_t hal_state = 0U;
+        uint32_t hal_err = 0U;
+        app_link_get_last_send_error(&err, &status, &hal_state, &hal_err);
+        APP_LOG_ERROR("FILE_READ_RESP send failed (%s, status=%lu state=%lu err=0x%lx)",
+                      app_link_send_err_str(err), (unsigned long)status,
+                      (unsigned long)hal_state, (unsigned long)hal_err);
+    }
+
+    return ok;
 }
 
 void app_file_init(void)
@@ -199,6 +229,7 @@ void app_file_init(void)
     if (retSD != 0U) {
         APP_LOG_ERROR("SD driver link failed (err=%u)", (unsigned int)retSD);
     } else {
+        memset(&SDFatFS, 0, sizeof(SDFatFS));
         FRESULT res = f_mount(&SDFatFS, (TCHAR const *)SDPath, 1);
         if (res != FR_OK) {
             APP_LOG_ERROR("SD mount failed (err=%d)", res);

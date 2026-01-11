@@ -80,6 +80,10 @@ void log_init(const robot_params_t *params) {
   s_initialized = true;
 }
 
+bool log_is_initialized(void) {
+  return s_initialized;
+}
+
 void log_push_record(const LogRecord *rec) {
   if (!s_initialized || rec == NULL) {
     return;

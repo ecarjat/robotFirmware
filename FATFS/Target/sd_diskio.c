@@ -71,6 +71,8 @@
 */
 /* USER CODE BEGIN enableScratchBuffer */
 #define ENABLE_SCRATCH_BUFFER
+#undef ALIGN_32BYTES
+#define ALIGN_32BYTES(buf) buf __attribute__((section(".dma_buffer"), aligned(32)))
 /* USER CODE END enableScratchBuffer */
 
 /* Private variables ---------------------------------------------------------*/
@@ -112,10 +114,6 @@ const Diskio_drvTypeDef  SD_Driver =
 };
 
 /* USER CODE BEGIN beforeFunctionSection */
-/* Real scratch buffer in RAM_D1 (.dma_buffer section) - accessible by SDMMC IDMA.
- * The CubeMX-generated scratch went to _scratch_unused_dtcm (in DTCMRAM, unusable by IDMA). */
-#undef scratch
-static uint8_t scratch[512U] __attribute__((section(".dma_buffer"), aligned(32)));
 /* USER CODE END beforeFunctionSection */
 
 /* Private functions ---------------------------------------------------------*/
@@ -381,19 +379,16 @@ DRESULT SD_write(BYTE lun, const BYTE *buff, DWORD sector, UINT count)
     else
     {
       /* Slow path, fetch each sector a part and memcpy to destination buffer */
-#if (ENABLE_SD_DMA_CACHE_MAINTENANCE == 1)
-      /*
-      * invalidate the scratch buffer before the next write to get the actual data instead of the cached one
-      */
-      SCB_InvalidateDCache_by_Addr((uint32_t*)scratch, BLOCKSIZE);
-#endif
-
       for (i = 0; i < count; i++)
       {
         WriteStatus = 0;
 
         memcpy((void *)scratch, (void *)buff, BLOCKSIZE);
         buff += BLOCKSIZE;
+#if (ENABLE_SD_DMA_CACHE_MAINTENANCE == 1)
+        /* Ensure scratch contents are in RAM before DMA reads. */
+        SCB_CleanDCache_by_Addr((uint32_t*)scratch, BLOCKSIZE);
+#endif
 
         ret = BSP_SD_WriteBlocks_DMA((uint32_t*)scratch, (uint32_t)sector++, 1);
         if (ret == MSD_OK) {

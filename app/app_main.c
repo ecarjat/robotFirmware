@@ -99,7 +99,7 @@ volatile uint8_t g_estop_active = 0U;
 static void app_init(void) {
   WDOG_CHECKPOINT(WDOG_CP_APP_INIT_START);
   /* Short delay for sensor power stabilization */
-  HAL_Delay(200);
+  HAL_Delay(3000);
   APP_LOG_INFO("Booting robot firmware (frame v%u)", ROBOT_FRAME_VERSION);
   APP_LOG_INFO("CMD channel id: %u", ROBOT_CHANNEL_CMD);
 
@@ -112,9 +112,25 @@ static void app_init(void) {
 
   /* Initialize blackbox logging */
   qspi_w25q64_init();
+  uint8_t manufacturer;
+  uint16_t device;
+  qspi_w25q64_read_id(&manufacturer, &device);
+  APP_LOG_INFO("QSPI W25Q64 flash manufacturer=0x%02x device=0x%04x",
+               manufacturer, device);
+
+
+  if (qspi_w25q64_is_ready()) {
+    APP_LOG_INFO("QSPI W25Q64 flash ready");
+  } else {
+    APP_LOG_ERROR("QSPI W25Q64 flash NOT ready - blackbox disabled");
+  }
   log_init(&g_robot_params);
-  APP_LOG_INFO("Blackbox logging initialized (fields=0x%08lx)",
-               (unsigned long)g_robot_params.log_fields_mask);
+  if (log_is_initialized()) {
+    APP_LOG_INFO("Blackbox logging initialized (fields=0x%08lx)",
+                 (unsigned long)g_robot_params.log_fields_mask);
+  } else {
+    APP_LOG_ERROR("Blackbox logging failed to initialize");
+  }
 
   /* Initialize file transfer */
   app_file_init();

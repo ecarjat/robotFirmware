@@ -46,6 +46,12 @@ typedef struct {
 void log_init(const robot_params_t *params);
 
 /**
+ * @brief Check if blackbox logging is initialized
+ * @return true if initialized, false otherwise
+ */
+bool log_is_initialized(void);
+
+/**
  * @brief Push a log record to the RAM queue
  *
  * Called from control loop (400Hz). Must be fast and non-blocking.

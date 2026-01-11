@@ -1,5 +1,6 @@
 #include "qspi_w25q64.h"
 
+#include "app_config.h"
 #include "main.h"
 #include "stm32h7xx_hal.h"
 #include <string.h>
@@ -15,6 +16,7 @@ static bool qspi_wait_ready(uint32_t timeout_ms);
 static bool qspi_write_enable(void);
 static void qspi_cache_clean(const void *addr, size_t len);
 static void qspi_cache_invalidate(void *addr, size_t len);
+static void qspi_log_ospi_error(const char *op, HAL_StatusTypeDef status);
 
 void qspi_w25q64_init(void) {
   /* OCTOSPI peripheral already initialized in main.c via MX_OCTOSPI1_Init() */
@@ -303,12 +305,17 @@ bool qspi_w25q64_read_id(uint8_t *manufacturer, uint16_t *device) {
   cmd.DQSMode = HAL_OSPI_DQS_DISABLE;
   cmd.SIOOMode = HAL_OSPI_SIOO_INST_EVERY_CMD;
 
-  if (HAL_OSPI_Command(&hospi1, &cmd, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+  HAL_StatusTypeDef status =
+      HAL_OSPI_Command(&hospi1, &cmd, HAL_OSPI_TIMEOUT_DEFAULT_VALUE);
+  if (status != HAL_OK) {
+    qspi_log_ospi_error("read_id command", status);
     return false;
   }
 
   uint8_t id_buf[3];
-  if (HAL_OSPI_Receive(&hospi1, id_buf, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+  status = HAL_OSPI_Receive(&hospi1, id_buf, HAL_OSPI_TIMEOUT_DEFAULT_VALUE);
+  if (status != HAL_OK) {
+    qspi_log_ospi_error("read_id receive", status);
     return false;
   }
 
@@ -379,4 +386,9 @@ static void qspi_cache_invalidate(void *addr, size_t len) {
 
   SCB_InvalidateDCache_by_Addr((uint32_t *)aligned_start,
                                (int32_t)(aligned_end - aligned_start));
+}
+
+static void qspi_log_ospi_error(const char *op, HAL_StatusTypeDef status) {
+  APP_LOG_ERROR("OSPI %s failed status=%d err=0x%08lx", op, (int)status,
+                (unsigned long)hospi1.ErrorCode);
 }
