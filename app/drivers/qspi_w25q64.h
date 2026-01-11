@@ -85,6 +85,37 @@ bool qspi_w25q64_read(uint32_t addr, uint8_t *buf, size_t len);
 bool qspi_w25q64_write_page(uint32_t addr, const uint8_t *buf, size_t len);
 
 /**
+ * @brief Async write status
+ */
+typedef enum {
+  QSPI_W25Q64_ASYNC_IDLE = 0,
+  QSPI_W25Q64_ASYNC_BUSY,
+  QSPI_W25Q64_ASYNC_DONE,
+  QSPI_W25Q64_ASYNC_ERROR
+} qspi_w25q64_async_state_t;
+
+/**
+ * @brief Start an async write (non-blocking)
+ *
+ * The caller must keep @p buf valid until the async write completes.
+ *
+ * @param addr Flash address
+ * @param buf  Data to write (must be 32-byte aligned for DMA)
+ * @param len  Number of bytes (>= 1)
+ * @return true if the write was accepted, false otherwise
+ */
+bool qspi_w25q64_write_async_start(uint32_t addr, const uint8_t *buf, size_t len);
+
+/**
+ * @brief Advance async write state machine
+ *
+ * Call periodically from the main loop to progress an async write.
+ *
+ * @return Current async write state
+ */
+qspi_w25q64_async_state_t qspi_w25q64_write_async_tick(void);
+
+/**
  * @brief Erase 4 KB sector
  *
  * @param addr Sector start address (must be 4KB-aligned)

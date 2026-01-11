@@ -2,6 +2,7 @@
 
 #include "crc32.h"
 #include "main.h"
+#include "blackbox_dump.h"
 #include "qspi_w25q64.h"
 #include <string.h>
 
@@ -38,6 +39,17 @@ static uint8_t s_write_chunk[LOG_WRITE_CHUNK_SIZE]
     __attribute__((section(".dma_buffer"), aligned(32)));
 static size_t s_write_chunk_len = 0;
 
+typedef enum {
+  LOG_WRITE_IDLE = 0,
+  LOG_WRITE_FIRST,
+  LOG_WRITE_SECOND
+} log_write_state_t;
+
+static log_write_state_t s_write_state = LOG_WRITE_IDLE;
+static uint32_t s_write_chunk_start_addr = LOG_RING_START;
+static size_t s_write_chunk_first_len = 0;
+static size_t s_write_chunk_second_len = 0;
+
 /* Initialization flag */
 static bool s_initialized = false;
 
@@ -46,7 +58,8 @@ static bool log_load_meta(void);
 static bool log_save_meta(void);
 static bool log_validate_meta(const LogMeta *meta);
 static void log_format_meta(void);
-static void log_flush_write_chunk(void);
+static bool log_flush_write_chunk(void);
+static void log_advance_write_addr_after_chunk(void);
 
 void log_init(const robot_params_t *params) {
   if (s_initialized) {
@@ -123,8 +136,51 @@ void log_writer_tick(void) {
     return;
   }
 
+  qspi_w25q64_async_state_t async_state = qspi_w25q64_write_async_tick();
+
+  if (s_write_state != LOG_WRITE_IDLE) {
+    if (async_state == QSPI_W25Q64_ASYNC_ERROR) {
+      s_qspi_write_errors++;
+      log_advance_write_addr_after_chunk();
+      s_write_chunk_len = 0;
+      s_write_chunk_first_len = 0;
+      s_write_chunk_second_len = 0;
+      s_write_state = LOG_WRITE_IDLE;
+    } else if (async_state == QSPI_W25Q64_ASYNC_DONE) {
+      if (s_write_state == LOG_WRITE_FIRST && s_write_chunk_second_len > 0) {
+        if (!qspi_w25q64_write_async_start(
+                LOG_RING_START, s_write_chunk + s_write_chunk_first_len,
+                s_write_chunk_second_len)) {
+          s_qspi_write_errors++;
+          log_advance_write_addr_after_chunk();
+          s_write_chunk_len = 0;
+          s_write_chunk_first_len = 0;
+          s_write_chunk_second_len = 0;
+          s_write_state = LOG_WRITE_IDLE;
+        } else {
+          s_write_state = LOG_WRITE_SECOND;
+          return;
+        }
+      } else {
+        log_advance_write_addr_after_chunk();
+        s_write_chunk_len = 0;
+        s_write_chunk_first_len = 0;
+        s_write_chunk_second_len = 0;
+        s_write_state = LOG_WRITE_IDLE;
+      }
+    }
+  }
+
+  if (log_is_dumping()) {
+    return;
+  }
+
   /* Check if flash is busy */
   if (qspi_w25q64_is_busy()) {
+    return;
+  }
+
+  if (s_write_state != LOG_WRITE_IDLE) {
     return;
   }
 
@@ -150,7 +206,9 @@ void log_writer_tick(void) {
 
     if (space_in_chunk < LOG_RECORD_SIZE) {
       /* Chunk full - flush it */
-      log_flush_write_chunk();
+      if (log_flush_write_chunk()) {
+        return;
+      }
       space_in_chunk = LOG_WRITE_CHUNK_SIZE;
     }
 
@@ -167,7 +225,9 @@ void log_writer_tick(void) {
 
     /* If chunk is full, flush it */
     if (s_write_chunk_len >= LOG_WRITE_CHUNK_SIZE) {
-      log_flush_write_chunk();
+      if (log_flush_write_chunk()) {
+        return;
+      }
       break;  /* One chunk per tick to avoid blocking too long */
     }
   }
@@ -251,42 +311,55 @@ uint32_t log_get_seq(void) { return s_next_seq; }
 
 /* Internal functions */
 
-static void log_flush_write_chunk(void) {
+static bool log_flush_write_chunk(void) {
+  if (s_write_chunk_len == 0) {
+    return false;
+  }
+
+  if (s_write_state != LOG_WRITE_IDLE) {
+    return false;
+  }
+
+  s_write_chunk_start_addr = s_write_addr;
+  s_write_chunk_first_len = s_write_chunk_len;
+  s_write_chunk_second_len = 0;
+
+  if (s_write_chunk_start_addr + s_write_chunk_len > LOG_RING_END) {
+    s_write_chunk_first_len = LOG_RING_END - s_write_chunk_start_addr;
+    s_write_chunk_second_len = s_write_chunk_len - s_write_chunk_first_len;
+  }
+
+  if (!qspi_w25q64_write_async_start(s_write_chunk_start_addr, s_write_chunk,
+                                    s_write_chunk_first_len)) {
+    s_qspi_write_errors++;
+    log_advance_write_addr_after_chunk();
+    s_write_chunk_len = 0;
+    s_write_chunk_first_len = 0;
+    s_write_chunk_second_len = 0;
+    s_write_state = LOG_WRITE_IDLE;
+    return false;
+  }
+
+  s_write_state = LOG_WRITE_FIRST;
+  return true;
+}
+
+static void log_advance_write_addr_after_chunk(void) {
   if (s_write_chunk_len == 0) {
     return;
   }
 
-  /* Write chunk to flash */
-  uint32_t addr = s_write_addr;
-  size_t len = s_write_chunk_len;
-
-  /* Handle ring wrap */
-  if (addr + len > LOG_RING_END) {
-    /* Split write across wrap boundary */
-    size_t first_part = LOG_RING_END - addr;
-    if (!qspi_w25q64_write_page(addr, s_write_chunk, first_part)) {
-      s_qspi_write_errors++;
-    }
-    if (!qspi_w25q64_write_page(LOG_RING_START, s_write_chunk + first_part,
-                                  len - first_part)) {
-      s_qspi_write_errors++;
-    }
-    s_write_addr = LOG_RING_START + (len - first_part);
+  if (s_write_chunk_start_addr + s_write_chunk_len > LOG_RING_END) {
+    s_write_addr = LOG_RING_START + s_write_chunk_second_len;
     s_wrap_count++;
-  } else {
-    /* Single contiguous write */
-    if (!qspi_w25q64_write_page(addr, s_write_chunk, len)) {
-      s_qspi_write_errors++;
-    }
-    s_write_addr = addr + len;
-    if (s_write_addr >= LOG_RING_END) {
-      s_write_addr = LOG_RING_START;
-      s_wrap_count++;
-    }
+    return;
   }
 
-  /* Reset chunk */
-  s_write_chunk_len = 0;
+  s_write_addr = s_write_chunk_start_addr + s_write_chunk_len;
+  if (s_write_addr >= LOG_RING_END) {
+    s_write_addr = LOG_RING_START;
+    s_wrap_count++;
+  }
 }
 
 static bool log_load_meta(void) {

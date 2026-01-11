@@ -11,12 +11,31 @@ extern OSPI_HandleTypeDef hospi1;
 /* Initialization flag */
 static bool s_initialized = false;
 
+typedef enum {
+  QSPI_ASYNC_IDLE = 0,
+  QSPI_ASYNC_START,
+  QSPI_ASYNC_WAIT_TX,
+  QSPI_ASYNC_WAIT_WIP,
+  QSPI_ASYNC_DONE,
+  QSPI_ASYNC_ERROR
+} qspi_async_state_t;
+
+static volatile qspi_async_state_t s_async_state = QSPI_ASYNC_IDLE;
+static uint32_t s_async_addr = 0;
+static const uint8_t *s_async_buf = NULL;
+static size_t s_async_remaining = 0;
+static size_t s_async_chunk = 0;
+static volatile uint8_t s_async_tx_done = 0;
+static volatile HAL_StatusTypeDef s_async_error_status = HAL_OK;
+static volatile uint8_t s_async_error_reported = 0;
+
 /* Internal helper functions */
 static bool qspi_wait_ready(uint32_t timeout_ms);
 static bool qspi_write_enable(void);
 static void qspi_cache_clean(const void *addr, size_t len);
 static void qspi_cache_invalidate(void *addr, size_t len);
 static void qspi_log_ospi_error(const char *op, HAL_StatusTypeDef status);
+static bool qspi_async_start_page(void);
 
 void qspi_w25q64_init(void) {
   /* OCTOSPI peripheral already initialized in main.c via MX_OCTOSPI1_Init() */
@@ -81,7 +100,7 @@ bool qspi_w25q64_read(uint32_t addr, uint8_t *buf, size_t len) {
 }
 
 bool qspi_w25q64_write_page(uint32_t addr, const uint8_t *buf, size_t len) {
-  if (!s_initialized || buf == NULL || len == 0 || len > W25Q64_PAGE_SIZE) {
+  if (!s_initialized || buf == NULL || len == 0) {
     return false;
   }
 
@@ -89,63 +108,167 @@ bool qspi_w25q64_write_page(uint32_t addr, const uint8_t *buf, size_t len) {
     return false;
   }
 
-  /* Check if we need to split write across page boundary */
-  uint32_t page_offset = addr % W25Q64_PAGE_SIZE;
-  if (page_offset + len > W25Q64_PAGE_SIZE) {
-    /* Split into two writes */
-    size_t first_chunk = W25Q64_PAGE_SIZE - page_offset;
-    if (!qspi_w25q64_write_page(addr, buf, first_chunk)) {
+  size_t remaining = len;
+  uint32_t cur_addr = addr;
+  const uint8_t *cur_buf = buf;
+
+  while (remaining > 0) {
+    size_t page_offset = cur_addr % W25Q64_PAGE_SIZE;
+    size_t chunk = W25Q64_PAGE_SIZE - page_offset;
+    if (chunk > remaining) {
+      chunk = remaining;
+    }
+
+    /* Wait for any previous operation to complete */
+    if (!qspi_wait_ready(W25Q64_TIMEOUT_PAGE_PROGRAM)) {
       return false;
     }
-    return qspi_w25q64_write_page(addr + first_chunk, buf + first_chunk,
-                                    len - first_chunk);
+
+    /* Enable write */
+    if (!qspi_write_enable()) {
+      return false;
+    }
+
+    /* Clean D-Cache before DMA write */
+    qspi_cache_clean(cur_buf, chunk);
+
+    /* Configure command for page program */
+    OSPI_RegularCmdTypeDef cmd = {0};
+    cmd.OperationType = HAL_OSPI_OPTYPE_COMMON_CFG;
+    cmd.FlashId = HAL_OSPI_FLASH_ID_1;
+    cmd.Instruction = W25Q64_CMD_PAGE_PROGRAM;
+    cmd.InstructionMode = HAL_OSPI_INSTRUCTION_1_LINE;
+    cmd.InstructionSize = HAL_OSPI_INSTRUCTION_8_BITS;
+    cmd.InstructionDtrMode = HAL_OSPI_INSTRUCTION_DTR_DISABLE;
+    cmd.Address = cur_addr;
+    cmd.AddressMode = HAL_OSPI_ADDRESS_1_LINE;
+    cmd.AddressSize = HAL_OSPI_ADDRESS_24_BITS;
+    cmd.AddressDtrMode = HAL_OSPI_ADDRESS_DTR_DISABLE;
+    cmd.AlternateBytesMode = HAL_OSPI_ALTERNATE_BYTES_NONE;
+    cmd.DataMode = HAL_OSPI_DATA_1_LINE;
+    cmd.NbData = chunk;
+    cmd.DataDtrMode = HAL_OSPI_DATA_DTR_DISABLE;
+    cmd.DummyCycles = 0;
+    cmd.DQSMode = HAL_OSPI_DQS_DISABLE;
+    cmd.SIOOMode = HAL_OSPI_SIOO_INST_EVERY_CMD;
+
+    if (HAL_OSPI_Command(&hospi1, &cmd, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) !=
+        HAL_OK) {
+      return false;
+    }
+
+    /* Transmit data */
+    if (HAL_OSPI_Transmit(&hospi1, (uint8_t *)cur_buf,
+                          HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+      return false;
+    }
+
+    /* Wait for write to complete */
+    if (!qspi_wait_ready(W25Q64_TIMEOUT_PAGE_PROGRAM)) {
+      return false;
+    }
+
+    cur_addr += chunk;
+    cur_buf += chunk;
+    remaining -= chunk;
   }
 
-  /* Wait for any previous operation to complete */
-  if (!qspi_wait_ready(W25Q64_TIMEOUT_PAGE_PROGRAM)) {
+  return true;
+}
+
+bool qspi_w25q64_write_async_start(uint32_t addr, const uint8_t *buf, size_t len) {
+  if (!s_initialized || buf == NULL || len == 0) {
     return false;
   }
 
-  /* Enable write */
-  if (!qspi_write_enable()) {
+  if (addr + len > W25Q64_FLASH_SIZE) {
     return false;
   }
 
-  /* Clean D-Cache before DMA write */
-  qspi_cache_clean(buf, len);
-
-  /* Configure command for page program */
-  OSPI_RegularCmdTypeDef cmd = {0};
-  cmd.OperationType = HAL_OSPI_OPTYPE_COMMON_CFG;
-  cmd.FlashId = HAL_OSPI_FLASH_ID_1;
-  cmd.Instruction = W25Q64_CMD_PAGE_PROGRAM;
-  cmd.InstructionMode = HAL_OSPI_INSTRUCTION_1_LINE;
-  cmd.InstructionSize = HAL_OSPI_INSTRUCTION_8_BITS;
-  cmd.InstructionDtrMode = HAL_OSPI_INSTRUCTION_DTR_DISABLE;
-  cmd.Address = addr;
-  cmd.AddressMode = HAL_OSPI_ADDRESS_1_LINE;
-  cmd.AddressSize = HAL_OSPI_ADDRESS_24_BITS;
-  cmd.AddressDtrMode = HAL_OSPI_ADDRESS_DTR_DISABLE;
-  cmd.AlternateBytesMode = HAL_OSPI_ALTERNATE_BYTES_NONE;
-  cmd.DataMode = HAL_OSPI_DATA_1_LINE;
-  cmd.NbData = len;
-  cmd.DataDtrMode = HAL_OSPI_DATA_DTR_DISABLE;
-  cmd.DummyCycles = 0;
-  cmd.DQSMode = HAL_OSPI_DQS_DISABLE;
-  cmd.SIOOMode = HAL_OSPI_SIOO_INST_EVERY_CMD;
-
-  if (HAL_OSPI_Command(&hospi1, &cmd, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+  if (s_async_state == QSPI_ASYNC_START ||
+      s_async_state == QSPI_ASYNC_WAIT_TX ||
+      s_async_state == QSPI_ASYNC_WAIT_WIP) {
     return false;
   }
 
-  /* Transmit data */
-  if (HAL_OSPI_Transmit(&hospi1, (uint8_t *)buf, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) !=
-      HAL_OK) {
-    return false;
+  s_async_addr = addr;
+  s_async_buf = buf;
+  s_async_remaining = len;
+  s_async_chunk = 0;
+  s_async_tx_done = 0;
+  s_async_error_status = HAL_OK;
+  s_async_error_reported = 0;
+  s_async_state = QSPI_ASYNC_START;
+
+  (void)qspi_w25q64_write_async_tick();
+  return s_async_state != QSPI_ASYNC_ERROR;
+}
+
+qspi_w25q64_async_state_t qspi_w25q64_write_async_tick(void) {
+  if (!s_initialized) {
+    return QSPI_W25Q64_ASYNC_ERROR;
   }
 
-  /* Wait for write to complete */
-  return qspi_wait_ready(W25Q64_TIMEOUT_PAGE_PROGRAM);
+  switch (s_async_state) {
+    case QSPI_ASYNC_START:
+      if ((qspi_w25q64_read_status() & W25Q64_SR_BUSY) != 0U) {
+        break;
+      }
+      if (!qspi_async_start_page()) {
+        break;
+      }
+      break;
+
+    case QSPI_ASYNC_WAIT_TX:
+      if (s_async_tx_done ||
+          HAL_OSPI_GetState(&hospi1) == HAL_OSPI_STATE_READY) {
+        s_async_tx_done = 0;
+        s_async_state = QSPI_ASYNC_WAIT_WIP;
+      }
+      break;
+
+    case QSPI_ASYNC_WAIT_WIP:
+      if ((qspi_w25q64_read_status() & W25Q64_SR_BUSY) != 0U) {
+        break;
+      }
+      s_async_addr += s_async_chunk;
+      s_async_buf += s_async_chunk;
+      s_async_remaining -= s_async_chunk;
+      s_async_chunk = 0;
+      if (s_async_remaining == 0U) {
+        s_async_state = QSPI_ASYNC_DONE;
+      } else {
+        s_async_state = QSPI_ASYNC_START;
+      }
+      break;
+
+    case QSPI_ASYNC_DONE:
+    case QSPI_ASYNC_ERROR:
+    case QSPI_ASYNC_IDLE:
+    default:
+      break;
+  }
+
+  if (s_async_state == QSPI_ASYNC_ERROR && !s_async_error_reported) {
+    s_async_error_reported = 1;
+    qspi_log_ospi_error("async write", s_async_error_status);
+  }
+
+  if (s_async_state == QSPI_ASYNC_DONE) {
+    s_async_state = QSPI_ASYNC_IDLE;
+    return QSPI_W25Q64_ASYNC_DONE;
+  }
+
+  if (s_async_state == QSPI_ASYNC_ERROR) {
+    s_async_state = QSPI_ASYNC_IDLE;
+    return QSPI_W25Q64_ASYNC_ERROR;
+  }
+
+  if (s_async_state == QSPI_ASYNC_IDLE) {
+    return QSPI_W25Q64_ASYNC_IDLE;
+  }
+
+  return QSPI_W25Q64_ASYNC_BUSY;
 }
 
 bool qspi_w25q64_erase_sector_4k(uint32_t addr) {
@@ -279,6 +402,12 @@ uint8_t qspi_w25q64_read_status(void) {
 }
 
 bool qspi_w25q64_is_busy(void) {
+  if (s_async_state == QSPI_ASYNC_START ||
+      s_async_state == QSPI_ASYNC_WAIT_TX ||
+      s_async_state == QSPI_ASYNC_WAIT_WIP) {
+    return true;
+  }
+
   uint8_t status = qspi_w25q64_read_status();
   return (status & W25Q64_SR_BUSY) != 0;
 }
@@ -391,4 +520,80 @@ static void qspi_cache_invalidate(void *addr, size_t len) {
 static void qspi_log_ospi_error(const char *op, HAL_StatusTypeDef status) {
   APP_LOG_ERROR("OSPI %s failed status=%d err=0x%08lx", op, (int)status,
                 (unsigned long)hospi1.ErrorCode);
+}
+
+static bool qspi_async_start_page(void) {
+  size_t page_offset = s_async_addr % W25Q64_PAGE_SIZE;
+  size_t chunk = W25Q64_PAGE_SIZE - page_offset;
+  if (chunk > s_async_remaining) {
+    chunk = s_async_remaining;
+  }
+
+  if (!qspi_write_enable()) {
+    s_async_error_status = HAL_ERROR;
+    s_async_state = QSPI_ASYNC_ERROR;
+    return false;
+  }
+
+  qspi_cache_clean(s_async_buf, chunk);
+
+  OSPI_RegularCmdTypeDef cmd = {0};
+  cmd.OperationType = HAL_OSPI_OPTYPE_COMMON_CFG;
+  cmd.FlashId = HAL_OSPI_FLASH_ID_1;
+  cmd.Instruction = W25Q64_CMD_PAGE_PROGRAM;
+  cmd.InstructionMode = HAL_OSPI_INSTRUCTION_1_LINE;
+  cmd.InstructionSize = HAL_OSPI_INSTRUCTION_8_BITS;
+  cmd.InstructionDtrMode = HAL_OSPI_INSTRUCTION_DTR_DISABLE;
+  cmd.Address = s_async_addr;
+  cmd.AddressMode = HAL_OSPI_ADDRESS_1_LINE;
+  cmd.AddressSize = HAL_OSPI_ADDRESS_24_BITS;
+  cmd.AddressDtrMode = HAL_OSPI_ADDRESS_DTR_DISABLE;
+  cmd.AlternateBytesMode = HAL_OSPI_ALTERNATE_BYTES_NONE;
+  cmd.DataMode = HAL_OSPI_DATA_1_LINE;
+  cmd.NbData = chunk;
+  cmd.DataDtrMode = HAL_OSPI_DATA_DTR_DISABLE;
+  cmd.DummyCycles = 0;
+  cmd.DQSMode = HAL_OSPI_DQS_DISABLE;
+  cmd.SIOOMode = HAL_OSPI_SIOO_INST_EVERY_CMD;
+
+  HAL_StatusTypeDef status =
+      HAL_OSPI_Command(&hospi1, &cmd, HAL_OSPI_TIMEOUT_DEFAULT_VALUE);
+  if (status != HAL_OK) {
+    s_async_error_status = status;
+    s_async_state = QSPI_ASYNC_ERROR;
+    return false;
+  }
+
+  status = HAL_OSPI_Transmit_DMA(&hospi1, (uint8_t *)s_async_buf);
+  if (status != HAL_OK) {
+    s_async_error_status = status;
+    s_async_state = QSPI_ASYNC_ERROR;
+    return false;
+  }
+
+  s_async_chunk = chunk;
+  s_async_tx_done = 0;
+  s_async_state = QSPI_ASYNC_WAIT_TX;
+  return true;
+}
+
+void HAL_OSPI_TxCpltCallback(OSPI_HandleTypeDef *hospi) {
+  if (hospi != &hospi1) {
+    return;
+  }
+
+  if (s_async_state == QSPI_ASYNC_WAIT_TX) {
+    s_async_tx_done = 1;
+  }
+}
+
+void HAL_OSPI_ErrorCallback(OSPI_HandleTypeDef *hospi) {
+  if (hospi != &hospi1) {
+    return;
+  }
+
+  if (s_async_state != QSPI_ASYNC_IDLE) {
+    s_async_error_status = HAL_ERROR;
+    s_async_state = QSPI_ASYNC_ERROR;
+  }
 }
