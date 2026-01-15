@@ -9,6 +9,14 @@ extern "C" {
 #include <stdint.h>
 
 /**
+ * @brief Initialize the blackbox dump module
+ *
+ * Must be called at startup to ensure the dump context is in a known
+ * clean state.
+ */
+void log_dump_init(void);
+
+/**
  * @brief Initiate a blackbox dump to SD card
  *
  * Dumps the last N seconds of logged data from the QSPI ring buffer

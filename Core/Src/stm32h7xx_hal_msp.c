@@ -364,12 +364,13 @@ void HAL_OSPI_MspInit(OSPI_HandleTypeDef* hospi)
     hmdma_octospi1_fifo_th.Init.TransferTriggerMode = MDMA_BUFFER_TRANSFER;
     hmdma_octospi1_fifo_th.Init.Priority = MDMA_PRIORITY_LOW;
     hmdma_octospi1_fifo_th.Init.Endianness = MDMA_LITTLE_ENDIANNESS_PRESERVE;
-    hmdma_octospi1_fifo_th.Init.SourceInc = MDMA_SRC_INC_DOUBLEWORD;
-    hmdma_octospi1_fifo_th.Init.DestinationInc = MDMA_DEST_DEC_WORD;
-    hmdma_octospi1_fifo_th.Init.SourceDataSize = MDMA_SRC_DATASIZE_WORD;
+    hmdma_octospi1_fifo_th.Init.SourceInc = MDMA_SRC_INC_BYTE;
+    hmdma_octospi1_fifo_th.Init.DestinationInc = MDMA_DEST_INC_DISABLE;
+    hmdma_octospi1_fifo_th.Init.SourceDataSize = MDMA_SRC_DATASIZE_BYTE;
     hmdma_octospi1_fifo_th.Init.DestDataSize = MDMA_DEST_DATASIZE_WORD;
     hmdma_octospi1_fifo_th.Init.DataAlignment = MDMA_DATAALIGN_PACKENABLE;
-    hmdma_octospi1_fifo_th.Init.BufferTransferLength = 1;
+    /* Must match OCTOSPI FIFO threshold (hospi1.Init.FifoThreshold = 16). */
+    hmdma_octospi1_fifo_th.Init.BufferTransferLength = 16;
     hmdma_octospi1_fifo_th.Init.SourceBurst = MDMA_SOURCE_BURST_SINGLE;
     hmdma_octospi1_fifo_th.Init.DestBurst = MDMA_DEST_BURST_SINGLE;
     hmdma_octospi1_fifo_th.Init.SourceBlockAddressOffset = 0;

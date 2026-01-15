@@ -36,8 +36,9 @@ static volatile uint32_t s_dropped_records = 0;
 
 /* Write state */
 static uint32_t s_write_addr = LOG_RING_START;
+static uint32_t s_write_addr_at_boot = LOG_RING_START;
 static uint32_t s_wrap_count = 0;
-static uint32_t s_next_seq = 0;
+static volatile uint32_t s_next_seq = 0;
 static uint32_t s_total_records = 0;
 
 /* Erase state */
@@ -114,6 +115,9 @@ void log_init(const robot_params_t *params) {
   s_boot_count++;
   log_save_meta();
 
+  /* Store initial write address for session-based dump calculations */
+  s_write_addr_at_boot = s_write_addr;
+
   s_initialized = true;
 }
 
@@ -154,6 +158,9 @@ void log_push_record(const LogRecord *rec) {
     memcpy(&s_log_queue[0], (const uint8_t *)rec + first_part,
            record_size - first_part);
   }
+
+  /* Update sequence number (for dumper) */
+  s_next_seq = rec->seq + 1;
 
   /* Write barrier: ensure data is visible before head update */
   LOG_QUEUE_WRITE_BARRIER();
@@ -206,6 +213,8 @@ void log_writer_tick(void) {
           return;
         }
       } else {
+        /* Count records once the full chunk is successfully written. */
+        s_total_records += (uint32_t)(s_write_chunk_len / LOG_RECORD_SIZE);
         log_advance_write_addr_after_chunk();
         s_write_chunk_len = 0;
         s_write_chunk_first_len = 0;
@@ -279,7 +288,6 @@ void log_writer_tick(void) {
     memcpy(&s_write_chunk[s_write_chunk_len], &s_log_queue[tail],
            LOG_RECORD_SIZE);
     s_write_chunk_len += LOG_RECORD_SIZE;
-    s_total_records++;
 
     /* Advance local tail */
     tail = (tail + LOG_RECORD_SIZE) % LOG_RAM_QUEUE_SIZE;
@@ -372,6 +380,8 @@ void log_get_stats(log_stats_t *out) {
 }
 
 uint32_t log_get_write_addr(void) { return s_write_addr; }
+
+uint32_t log_get_boot_write_addr(void) { return s_write_addr_at_boot; }
 
 uint32_t log_get_seq(void) { return s_next_seq; }
 
@@ -522,6 +532,14 @@ static bool log_validate_meta(const LogMeta *meta) {
     return false;
   }
 
+  /* Check record and ring layout */
+  if (meta->record_size != LOG_RECORD_SIZE) {
+    return false;
+  }
+  if (meta->ring_start != LOG_RING_START || meta->ring_size != LOG_RING_SIZE) {
+    return false;
+  }
+
   /* Check CRC */
   uint32_t calc_crc =
       robot_crc32((const uint8_t *)meta, sizeof(LogMeta) - sizeof(uint32_t));
@@ -531,6 +549,11 @@ static bool log_validate_meta(const LogMeta *meta) {
 
   /* Check bounds */
   if (meta->write_addr < LOG_RING_START || meta->write_addr >= LOG_RING_END) {
+    return false;
+  }
+
+  /* Ensure write_addr is aligned to the record size relative to ring start */
+  if (((meta->write_addr - LOG_RING_START) % LOG_RECORD_SIZE) != 0U) {
     return false;
   }
 

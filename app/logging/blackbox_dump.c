@@ -41,6 +41,7 @@ static struct {
   uint32_t bytes_written;    /* Total bytes written to SD */
   char filename[16];         /* DUMP_nnnn.BIN */
   uint32_t last_dump_id;     /* Dump file counter */
+  size_t current_chunk_size; /* Size of chunk being transferred */
 } s_dump_ctx __attribute__((section(".dma_buffer"), aligned(32)));
 
 static LogMeta s_dump_meta __attribute__((section(".dma_buffer"), aligned(32)));
@@ -53,12 +54,14 @@ static void dump_reset_context(void);
 static bool dump_calculate_window(uint32_t seconds);
 static bool dump_generate_filename(void);
 static void dump_advance_state(dump_state_t next_state);
+static void dump_clean_cache(const void *addr, size_t len);
+
+void log_dump_init(void) {
+  dump_reset_context();
+  s_dump_ctx_initialized = true;
+}
 
 bool log_dump_last_seconds(uint32_t seconds) {
-  if (!s_dump_ctx_initialized) {
-    dump_reset_context();
-    s_dump_ctx_initialized = true;
-  }
   /* Check if already dumping */
   if (s_dump_ctx.state != DUMP_IDLE) {
     return false;
@@ -101,7 +104,9 @@ bool log_dump_last_seconds(uint32_t seconds) {
   /* Debug: Read first 16 bytes from QSPI at start address to verify content */
   {
     uint8_t qspi_sample[16];
-    if (qspi_w25q64_read(s_dump_ctx.start_addr, qspi_sample, sizeof(qspi_sample))) {
+    if (qspi_w25q64_is_busy()) {
+      APP_LOG_WARN("QSPI busy, sample skipped");
+    } else if (qspi_w25q64_read(s_dump_ctx.start_addr, qspi_sample, sizeof(qspi_sample))) {
       APP_LOG_INFO("QSPI sample at 0x%06lX: %02X %02X %02X %02X %02X %02X %02X %02X",
                    (unsigned long)s_dump_ctx.start_addr,
                    qspi_sample[0], qspi_sample[1], qspi_sample[2], qspi_sample[3],
@@ -172,6 +177,7 @@ void log_dump_tick(void) {
             robot_crc32((const uint8_t *)&s_dump_meta,
                         sizeof(LogMeta) - sizeof(uint32_t));
 
+        dump_clean_cache(&s_dump_meta, sizeof(s_dump_meta));
         res = f_write(&s_dump_ctx.file, &s_dump_meta, sizeof(LogMeta),
                       &bytes_written);
         if (res != FR_OK || bytes_written != sizeof(LogMeta)) {
@@ -199,6 +205,7 @@ void log_dump_tick(void) {
         if (chunk_size > s_dump_ctx.bytes_remaining) {
           chunk_size = s_dump_ctx.bytes_remaining;
         }
+        s_dump_ctx.current_chunk_size = chunk_size;
 
         uint32_t read_addr = s_dump_ctx.current_addr;
 
@@ -240,10 +247,10 @@ void log_dump_tick(void) {
     case DUMP_WRITING_SD:
       /* Write chunk to SD card */
       {
-        size_t chunk_size = DUMP_CHUNK_SIZE;
-        if (chunk_size > (s_dump_ctx.current_addr - s_dump_ctx.start_addr)) {
-          chunk_size = s_dump_ctx.current_addr - s_dump_ctx.start_addr;
-        }
+        size_t chunk_size = s_dump_ctx.current_chunk_size;
+
+        /* Flush cache so SD DMA reads the latest QSPI data. */
+        dump_clean_cache(s_dump_buffer, chunk_size);
 
         res = f_write(&s_dump_ctx.file, s_dump_buffer, chunk_size, &bytes_written);
         if (res != FR_OK || bytes_written != chunk_size) {
@@ -274,6 +281,7 @@ void log_dump_tick(void) {
         s_dump_trailer.record_count = s_dump_ctx.record_count;
         s_dump_trailer.dump_crc32 = 0;  /* CRC not computed (would need incremental API) */
 
+        dump_clean_cache(&s_dump_trailer, sizeof(s_dump_trailer));
         res = f_write(&s_dump_ctx.file, &s_dump_trailer,
                       sizeof(LogDumpTrailer), &bytes_written);
         if (res != FR_OK || bytes_written != sizeof(LogDumpTrailer)) {
@@ -333,39 +341,85 @@ bool log_get_dump_stats(uint32_t *records_written, uint32_t *bytes_written) {
 /* Internal functions */
 
 static void dump_reset_context(void) {
-  APP_LOG_WARN("Dump reset (was in state %s)", dump_state_name(s_dump_ctx.state));
+  if (s_dump_ctx_initialized) {
+    APP_LOG_WARN("Dump reset (was in state %s)", dump_state_name(s_dump_ctx.state));
+  }
   memset(&s_dump_ctx, 0, sizeof(s_dump_ctx));
   s_dump_ctx.state = DUMP_IDLE;
 }
 
 static bool dump_calculate_window(uint32_t seconds) {
-  /* Get current write position */
+  /* Get current and boot-time logger state */
   uint32_t write_addr = log_get_write_addr();
+  uint32_t boot_write_addr = log_get_boot_write_addr();
   uint32_t current_seq = log_get_seq();
+  log_stats_t stats;
+  log_get_stats(&stats);
 
-  /* Calculate bytes for time window using actual log rate */
+  /* Compute how many bytes are actually committed to QSPI this session. */
+  uint32_t bytes_written = 0;
+  if (write_addr >= boot_write_addr) {
+    bytes_written = write_addr - boot_write_addr;
+  } else {
+    bytes_written = (LOG_RING_END - boot_write_addr) +
+                    (write_addr - LOG_RING_START);
+  }
+  uint32_t records_written = bytes_written / LOG_RECORD_SIZE;
+  APP_LOG_INFO("Dump debug: committed bytes=%lu records=%lu (stats.total=%lu)",
+               (unsigned long)bytes_written, (unsigned long)records_written,
+               (unsigned long)stats.total_records);
+
+  /* Determine how many records to dump */
   uint16_t rate_hz = log_get_rate_hz();
   if (rate_hz == 0) {
-    rate_hz = 1;  /* Fallback to prevent division by zero */
+    rate_hz = 1;
   }
   uint32_t records = seconds * (uint32_t)rate_hz;
+
+  /* Don't dump more records than exist in this boot session */
+  if (records > records_written) {
+    records = records_written;
+  }
+
+  if (records == 0) {
+    APP_LOG_WARN("No records to dump in this session.");
+    return false;
+  }
+
   uint32_t bytes = records * LOG_RECORD_SIZE;
 
-  /* Clamp to ring size */
-  if (bytes > LOG_RING_SIZE) {
-    bytes = LOG_RING_SIZE;
-    records = bytes / LOG_RECORD_SIZE;
-  }
-
-  /* Calculate start address (going backwards from write position) */
+  /*
+   * Calculate the start address for the dump. This is complex because
+   * the valid data from this session might wrap around the ring buffer.
+   *
+   * We have two main scenarios:
+   * 1. The data written this session is contiguous (no wrap).
+   * 2. The data has wrapped around the end of the ring buffer.
+   */
   uint32_t start_addr;
-  if (write_addr >= LOG_RING_START + bytes) {
+  if (write_addr >= boot_write_addr) {
+    /* SCENARIO 1: No wrap during this session.
+     * Data is in a single block: [boot_write_addr, write_addr)
+     */
     start_addr = write_addr - bytes;
   } else {
-    /* Wrap around */
-    uint32_t deficit = bytes - (write_addr - LOG_RING_START);
-    start_addr = LOG_RING_END - deficit;
+    /* SCENARIO 2: A wrap has occurred during this session.
+     * Data is in two blocks:
+     * - [boot_write_addr, LOG_RING_END)
+     * - [LOG_RING_START, write_addr)
+     */
+    uint32_t bytes_after_wrap = write_addr - LOG_RING_START;
+
+    if (bytes <= bytes_after_wrap) {
+      /* The entire dump fits in the block at the start of the ring */
+      start_addr = write_addr - bytes;
+    } else {
+      /* The dump spans both blocks (pre and post-wrap) */
+      uint32_t deficit = bytes - bytes_after_wrap;
+      start_addr = LOG_RING_END - deficit;
+    }
   }
+
 
   /* Store dump window */
   s_dump_ctx.start_addr = start_addr;
@@ -382,7 +436,7 @@ static bool dump_calculate_window(uint32_t seconds) {
                (unsigned long)current_seq, (unsigned)rate_hz);
 
   /* Warn if no data to dump */
-  if (write_addr == LOG_RING_START || current_seq == 0) {
+  if (records_written == 0) {
     APP_LOG_WARN("Dump requested but no records written yet (write_addr=0x%06lX, seq=%lu)",
                  (unsigned long)write_addr, (unsigned long)current_seq);
   }
@@ -462,4 +516,21 @@ static void dump_advance_state(dump_state_t next_state) {
   APP_LOG_INFO("Dump: %s -> %s", dump_state_name(s_dump_ctx.state),
                dump_state_name(next_state));
   s_dump_ctx.state = next_state;
+}
+
+static void dump_clean_cache(const void *addr, size_t len) {
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+  if (addr == NULL || len == 0U) {
+    return;
+  }
+  uintptr_t start = (uintptr_t)addr;
+  uintptr_t end = start + len;
+  uintptr_t aligned_start = start & ~(uintptr_t)(32U - 1U);
+  uintptr_t aligned_end = (end + (32U - 1U)) & ~(uintptr_t)(32U - 1U);
+  SCB_CleanDCache_by_Addr((uint32_t *)aligned_start,
+                          (int32_t)(aligned_end - aligned_start));
+#else
+  (void)addr;
+  (void)len;
+#endif
 }

@@ -35,6 +35,9 @@ static bool qspi_write_enable(void);
 static void qspi_cache_clean(const void *addr, size_t len);
 static void qspi_log_ospi_error(const char *op, HAL_StatusTypeDef status);
 static bool qspi_async_start_page(void);
+static bool qspi_read_status_reg(uint8_t cmd_byte, uint8_t *status);
+static bool qspi_write_status(uint8_t sr1, uint8_t sr2);
+static void qspi_clear_block_protection(void);
 
 void qspi_w25q64_init(void) {
   /* OCTOSPI peripheral already initialized in main.c via MX_OCTOSPI1_Init() */
@@ -46,6 +49,7 @@ void qspi_w25q64_init(void) {
   if (qspi_w25q64_read_id(&manufacturer, &device)) {
     if (manufacturer == 0xEF && device == 0x4017) {
       s_initialized = true;
+      qspi_clear_block_protection();
     }
   }
 }
@@ -380,32 +384,10 @@ uint8_t qspi_w25q64_read_status(void) {
     return 0xFF;
   }
 
-  /* Configure command for reading status register */
-  OSPI_RegularCmdTypeDef cmd = {0};
-  cmd.OperationType = HAL_OSPI_OPTYPE_COMMON_CFG;
-  cmd.FlashId = HAL_OSPI_FLASH_ID_1;
-  cmd.Instruction = W25Q64_CMD_READ_STATUS_REG1;
-  cmd.InstructionMode = HAL_OSPI_INSTRUCTION_1_LINE;
-  cmd.InstructionSize = HAL_OSPI_INSTRUCTION_8_BITS;
-  cmd.InstructionDtrMode = HAL_OSPI_INSTRUCTION_DTR_DISABLE;
-  cmd.AddressMode = HAL_OSPI_ADDRESS_NONE;
-  cmd.AlternateBytesMode = HAL_OSPI_ALTERNATE_BYTES_NONE;
-  cmd.DataMode = HAL_OSPI_DATA_1_LINE;
-  cmd.NbData = 1;
-  cmd.DataDtrMode = HAL_OSPI_DATA_DTR_DISABLE;
-  cmd.DummyCycles = 0;
-  cmd.DQSMode = HAL_OSPI_DQS_DISABLE;
-  cmd.SIOOMode = HAL_OSPI_SIOO_INST_EVERY_CMD;
-
-  if (HAL_OSPI_Command(&hospi1, &cmd, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+  uint8_t status = 0xFF;
+  if (!qspi_read_status_reg(W25Q64_CMD_READ_STATUS_REG1, &status)) {
     return 0xFF;
   }
-
-  uint8_t status = 0;
-  if (HAL_OSPI_Receive(&hospi1, &status, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
-    return 0xFF;
-  }
-
   return status;
 }
 
@@ -496,7 +478,12 @@ static bool qspi_write_enable(void) {
     return false;
   }
 
-  return true;
+  uint8_t status = 0xFF;
+  if (!qspi_read_status_reg(W25Q64_CMD_READ_STATUS_REG1, &status)) {
+    return false;
+  }
+
+  return ((status & W25Q64_SR_WEL) != 0U);
 }
 
 static void qspi_cache_clean(const void *addr, size_t len) {
@@ -515,6 +502,117 @@ static void qspi_cache_clean(const void *addr, size_t len) {
 static void qspi_log_ospi_error(const char *op, HAL_StatusTypeDef status) {
   APP_LOG_ERROR("OSPI %s failed status=%d err=0x%08lx", op, (int)status,
                 (unsigned long)hospi1.ErrorCode);
+}
+
+static bool qspi_read_status_reg(uint8_t cmd_byte, uint8_t *status) {
+  if (!s_initialized || status == NULL) {
+    return false;
+  }
+
+  OSPI_RegularCmdTypeDef cmd = {0};
+  cmd.OperationType = HAL_OSPI_OPTYPE_COMMON_CFG;
+  cmd.FlashId = HAL_OSPI_FLASH_ID_1;
+  cmd.Instruction = cmd_byte;
+  cmd.InstructionMode = HAL_OSPI_INSTRUCTION_1_LINE;
+  cmd.InstructionSize = HAL_OSPI_INSTRUCTION_8_BITS;
+  cmd.InstructionDtrMode = HAL_OSPI_INSTRUCTION_DTR_DISABLE;
+  cmd.AddressMode = HAL_OSPI_ADDRESS_NONE;
+  cmd.AlternateBytesMode = HAL_OSPI_ALTERNATE_BYTES_NONE;
+  cmd.DataMode = HAL_OSPI_DATA_1_LINE;
+  cmd.NbData = 1;
+  cmd.DataDtrMode = HAL_OSPI_DATA_DTR_DISABLE;
+  cmd.DummyCycles = 0;
+  cmd.DQSMode = HAL_OSPI_DQS_DISABLE;
+  cmd.SIOOMode = HAL_OSPI_SIOO_INST_EVERY_CMD;
+
+  if (HAL_OSPI_Command(&hospi1, &cmd, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+    return false;
+  }
+
+  if (HAL_OSPI_Receive(&hospi1, status, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+    return false;
+  }
+
+  return true;
+}
+
+static bool qspi_write_status(uint8_t sr1, uint8_t sr2) {
+  if (!s_initialized) {
+    return false;
+  }
+
+  if (!qspi_wait_ready(W25Q64_TIMEOUT_PAGE_PROGRAM)) {
+    return false;
+  }
+
+  if (!qspi_write_enable()) {
+    return false;
+  }
+
+  uint8_t status_bytes[2] = {sr1, sr2};
+
+  OSPI_RegularCmdTypeDef cmd = {0};
+  cmd.OperationType = HAL_OSPI_OPTYPE_COMMON_CFG;
+  cmd.FlashId = HAL_OSPI_FLASH_ID_1;
+  cmd.Instruction = W25Q64_CMD_WRITE_STATUS_REG;
+  cmd.InstructionMode = HAL_OSPI_INSTRUCTION_1_LINE;
+  cmd.InstructionSize = HAL_OSPI_INSTRUCTION_8_BITS;
+  cmd.InstructionDtrMode = HAL_OSPI_INSTRUCTION_DTR_DISABLE;
+  cmd.AddressMode = HAL_OSPI_ADDRESS_NONE;
+  cmd.AlternateBytesMode = HAL_OSPI_ALTERNATE_BYTES_NONE;
+  cmd.DataMode = HAL_OSPI_DATA_1_LINE;
+  cmd.NbData = sizeof(status_bytes);
+  cmd.DataDtrMode = HAL_OSPI_DATA_DTR_DISABLE;
+  cmd.DummyCycles = 0;
+  cmd.DQSMode = HAL_OSPI_DQS_DISABLE;
+  cmd.SIOOMode = HAL_OSPI_SIOO_INST_EVERY_CMD;
+
+  if (HAL_OSPI_Command(&hospi1, &cmd, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+    return false;
+  }
+
+  if (HAL_OSPI_Transmit(&hospi1, status_bytes, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
+    return false;
+  }
+
+  return qspi_wait_ready(W25Q64_TIMEOUT_PAGE_PROGRAM);
+}
+
+static void qspi_clear_block_protection(void) {
+  uint8_t sr1 = 0xFF;
+  uint8_t sr2 = 0xFF;
+
+  if (!qspi_read_status_reg(W25Q64_CMD_READ_STATUS_REG1, &sr1) ||
+      !qspi_read_status_reg(W25Q64_CMD_READ_STATUS_REG2, &sr2)) {
+    APP_LOG_WARN("QSPI status read failed");
+    return;
+  }
+
+  uint8_t new_sr1 = (uint8_t)(sr1 & ~0x1CU);  /* Clear BP[2:0] */
+  uint8_t new_sr2 = (uint8_t)(sr2 & ~(1U << 6));  /* Clear CMP */
+
+  if (new_sr1 == sr1 && new_sr2 == sr2) {
+    return;
+  }
+
+  if (!qspi_write_status(new_sr1, new_sr2)) {
+    APP_LOG_WARN("QSPI status write failed");
+    return;
+  }
+
+  if (!qspi_read_status_reg(W25Q64_CMD_READ_STATUS_REG1, &sr1) ||
+      !qspi_read_status_reg(W25Q64_CMD_READ_STATUS_REG2, &sr2)) {
+    APP_LOG_WARN("QSPI status verify failed");
+    return;
+  }
+
+  if ((sr1 & 0x1CU) != 0U || (sr2 & (1U << 6)) != 0U) {
+    APP_LOG_WARN("QSPI block protection still enabled (sr1=0x%02x sr2=0x%02x)",
+                 sr1, sr2);
+  } else {
+    APP_LOG_INFO("QSPI block protection cleared (sr1=0x%02x sr2=0x%02x)",
+                 sr1, sr2);
+  }
 }
 
 static bool qspi_async_start_page(void) {
@@ -559,7 +657,15 @@ static bool qspi_async_start_page(void) {
     return false;
   }
 
-  status = HAL_OSPI_Transmit_DMA(&hospi1, (uint8_t *)s_async_buf);
+  bool use_dma = ((chunk & 0x3U) == 0U);
+
+  if (use_dma) {
+    status = HAL_OSPI_Transmit_DMA(&hospi1, (uint8_t *)s_async_buf);
+  } else {
+    APP_LOG_WARN("QSPI DMA fallback: length not word-aligned addr=0x%06lx len=%lu",
+                 (unsigned long)s_async_addr, (unsigned long)chunk);
+    status = HAL_OSPI_Transmit_IT(&hospi1, (uint8_t *)s_async_buf);
+  }
   if (status != HAL_OK) {
     s_async_error_status = status;
     s_async_state = QSPI_ASYNC_ERROR;

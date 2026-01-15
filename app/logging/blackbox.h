@@ -97,6 +97,13 @@ void log_get_stats(log_stats_t *out);
 uint32_t log_get_write_addr(void);
 
 /**
+ * @brief Get the write position in the ring buffer at boot time
+ *
+ * @return Write address at boot
+ */
+uint32_t log_get_boot_write_addr(void);
+
+/**
  * @brief Get current sequence number
  *
  * @return Next sequence number to be assigned

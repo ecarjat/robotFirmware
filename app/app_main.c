@@ -125,9 +125,16 @@ static void app_init(void) {
     APP_LOG_ERROR("QSPI W25Q64 flash NOT ready - blackbox disabled");
   }
   log_init(&g_robot_params);
+  log_dump_init();
   if (log_is_initialized()) {
     APP_LOG_INFO("Blackbox logging initialized (fields=0x%08lx)",
                  (unsigned long)g_robot_params.log_fields_mask);
+    uint32_t write_addr = log_get_write_addr();
+    uint32_t boot_write_addr = log_get_boot_write_addr();
+    uint32_t align = (write_addr - LOG_RING_START) % LOG_RECORD_SIZE;
+    APP_LOG_INFO("Blackbox write ptr=0x%06lx boot=0x%06lx mod=%lu",
+                 (unsigned long)write_addr, (unsigned long)boot_write_addr,
+                 (unsigned long)align);
   } else {
     APP_LOG_ERROR("Blackbox logging failed to initialize");
   }
