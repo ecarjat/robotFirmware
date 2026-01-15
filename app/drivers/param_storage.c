@@ -239,7 +239,8 @@ static bool param_validate_record(uint32_t address, param_header_t *header_out,
 
     if (header->version != PARAM_VERSION)
     {
-        /* TODO: Handle version migration here */
+        /* Version mismatch - reject and use defaults.
+         * Future enhancement: implement version migration for backward compatibility. */
         return false;
     }
 

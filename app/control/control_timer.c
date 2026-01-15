@@ -222,6 +222,25 @@ void control_timer_reset_diag(void)
     __enable_irq();
 }
 
+uint32_t control_timer_time_to_deadline_us(void)
+{
+    if (s_period_us == 0 || s_cpu_freq_mhz == 0) {
+        return 0;
+    }
+
+    uint32_t last_isr = s_isr_timestamp;
+    if (last_isr == 0) {
+        return 0;
+    }
+
+    uint32_t now = DWT_CYCCNT;
+    uint32_t elapsed_us = cycles_to_us(now - last_isr);
+    if (elapsed_us >= s_period_us) {
+        return 0;
+    }
+    return s_period_us - elapsed_us;
+}
+
 void control_timer_isr_callback(void)
 {
     /* Record timestamp immediately */

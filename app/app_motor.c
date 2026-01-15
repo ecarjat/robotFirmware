@@ -5,7 +5,6 @@
 #include "motor_link.h"
 #include "robot_protocol.h"
 
-#define APP_MOTOR_MANUAL_PERIOD_MS 20U
 
 app_motor_manual_t s_motor_manual = {0U, 0.0f, 0.0f};
 

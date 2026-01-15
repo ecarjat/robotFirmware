@@ -4,13 +4,34 @@
 #include "main.h"
 #include "blackbox_dump.h"
 #include "qspi_w25q64.h"
+#include "config_control.h"
+#include <limits.h>
 #include <string.h>
+
+/*
+ * Lock-free SPSC (Single Producer Single Consumer) Queue
+ * -------------------------------------------------------
+ * Producer: log_push_record() - called from control loop (may be ISR context)
+ * Consumer: log_writer_tick() - called from main loop only
+ *
+ * Safety guarantees:
+ * - Producer only writes s_queue_head, consumer only reads it
+ * - Consumer only writes s_queue_tail, producer only reads it
+ * - Memory barriers ensure data visibility before/after index updates
+ * - No interrupt disabling needed for SPSC queues
+ */
+
+/* Memory barrier macros for ARM Cortex-M7 */
+#define LOG_QUEUE_WRITE_BARRIER()  __DMB()  /* Ensure writes complete before index update */
+#define LOG_QUEUE_READ_BARRIER()   __DMB()  /* Ensure index read before data read */
 
 /* RAM queue for log records (in .dma_buffer section) */
 static uint8_t s_log_queue[LOG_RAM_QUEUE_SIZE]
     __attribute__((section(".dma_buffer"), aligned(32)));
-static volatile uint32_t s_queue_head = 0;
-static volatile uint32_t s_queue_tail = 0;
+
+/* SPSC queue indices - producer writes head, consumer writes tail */
+static volatile uint32_t s_queue_head = 0;  /* Written by producer only */
+static volatile uint32_t s_queue_tail = 0;  /* Written by consumer only */
 static volatile uint32_t s_dropped_records = 0;
 
 /* Write state */
@@ -33,6 +54,7 @@ static uint32_t s_qspi_write_errors = 0;
 
 /* Active log fields mask */
 static uint32_t s_log_fields_mask = LOG_FIELDS_MASK_DEFAULT;
+static uint16_t s_log_rate_hz = 0U;
 
 /* Write chunk buffer (in .dma_buffer section) */
 static uint8_t s_write_chunk[LOG_WRITE_CHUNK_SIZE]
@@ -60,6 +82,7 @@ static bool log_validate_meta(const LogMeta *meta);
 static void log_format_meta(void);
 static bool log_flush_write_chunk(void);
 static void log_advance_write_addr_after_chunk(void);
+static uint16_t log_rate_from_params(const robot_params_t *params);
 
 void log_init(const robot_params_t *params) {
   if (s_initialized) {
@@ -79,6 +102,7 @@ void log_init(const robot_params_t *params) {
   if (s_log_fields_mask == 0) {
     s_log_fields_mask = LOG_FIELDS_MASK_DEFAULT;
   }
+  s_log_rate_hz = log_rate_from_params(params);
 
   /* Try to load existing metadata */
   if (!log_load_meta()) {
@@ -102,18 +126,24 @@ void log_push_record(const LogRecord *rec) {
     return;
   }
 
-  /* Calculate space needed */
-  const size_t record_size = LOG_RECORD_SIZE;
-  uint32_t next_head = (s_queue_head + record_size) % LOG_RAM_QUEUE_SIZE;
+  /*
+   * SPSC Producer: Only this function writes s_queue_head.
+   * Consumer (log_writer_tick) only reads s_queue_head.
+   * We read s_queue_tail to check for full condition (safe - consumer writes it).
+   */
 
-  /* Check if queue is full */
-  if (next_head == s_queue_tail) {
+  const size_t record_size = LOG_RECORD_SIZE;
+  uint32_t head = s_queue_head;
+  uint32_t next_head = (head + record_size) % LOG_RAM_QUEUE_SIZE;
+
+  /* Read tail once to check if queue is full */
+  uint32_t tail = s_queue_tail;
+  if (next_head == tail) {
     s_dropped_records++;
     return;
   }
 
   /* Copy record into queue */
-  uint32_t head = s_queue_head;
   if (head + record_size <= LOG_RAM_QUEUE_SIZE) {
     /* Contiguous copy */
     memcpy(&s_log_queue[head], rec, record_size);
@@ -121,18 +151,32 @@ void log_push_record(const LogRecord *rec) {
     /* Wrap-around copy */
     size_t first_part = LOG_RAM_QUEUE_SIZE - head;
     memcpy(&s_log_queue[head], rec, first_part);
-    memcpy(&s_log_queue[0], (uint8_t *)rec + first_part,
+    memcpy(&s_log_queue[0], (const uint8_t *)rec + first_part,
            record_size - first_part);
   }
 
-  /* Update head pointer */
-  __disable_irq();
+  /* Write barrier: ensure data is visible before head update */
+  LOG_QUEUE_WRITE_BARRIER();
+
+  /* Publish new head (atomic 32-bit write on ARM) */
   s_queue_head = next_head;
-  __enable_irq();
 }
 
+/* Debug: track why writer isn't progressing (non-static for external access) */
+uint32_t s_writer_debug_counter = 0;
+uint32_t s_writer_not_init = 0;
+uint32_t s_writer_busy = 0;
+uint32_t s_writer_dumping = 0;
+uint32_t s_writer_not_idle = 0;
+uint32_t s_writer_queue_empty = 0;
+uint32_t s_writer_flush_ok = 0;
+uint32_t s_writer_flush_fail = 0;
+
 void log_writer_tick(void) {
+  s_writer_debug_counter++;
+
   if (!s_initialized) {
+    s_writer_not_init++;
     return;
   }
 
@@ -172,25 +216,40 @@ void log_writer_tick(void) {
   }
 
   if (log_is_dumping()) {
+    s_writer_dumping++;
     return;
   }
 
   /* Check if flash is busy */
   if (qspi_w25q64_is_busy()) {
+    s_writer_busy++;
     return;
   }
 
   if (s_write_state != LOG_WRITE_IDLE) {
+    s_writer_not_idle++;
     return;
   }
 
-  /* Process queued records */
-  while (s_queue_tail != s_queue_head) {
-    /* Calculate available data */
-    uint32_t tail = s_queue_tail;
-    uint32_t head = s_queue_head;
-    size_t available;
+  /*
+   * SPSC Consumer: Only this function writes s_queue_tail.
+   * Producer (log_push_record) only reads s_queue_tail.
+   * We read s_queue_head to check for empty condition (safe - producer writes it).
+   */
+  uint32_t tail = s_queue_tail;
 
+  while (1) {
+    /* Read head with barrier to ensure we see producer's data */
+    uint32_t head = s_queue_head;
+    LOG_QUEUE_READ_BARRIER();
+
+    if (tail == head) {
+      s_writer_queue_empty++;
+      break;  /* Queue empty */
+    }
+
+    /* Calculate available data (contiguous from tail) */
+    size_t available;
     if (head >= tail) {
       available = head - tail;
     } else {
@@ -207,30 +266,37 @@ void log_writer_tick(void) {
     if (space_in_chunk < LOG_RECORD_SIZE) {
       /* Chunk full - flush it */
       if (log_flush_write_chunk()) {
+        s_writer_flush_ok++;
+        /* Update tail before returning */
+        s_queue_tail = tail;
         return;
       }
+      s_writer_flush_fail++;
       space_in_chunk = LOG_WRITE_CHUNK_SIZE;
     }
 
-    /* Copy one record */
+    /* Copy one record (data is valid - producer completed write before updating head) */
     memcpy(&s_write_chunk[s_write_chunk_len], &s_log_queue[tail],
            LOG_RECORD_SIZE);
     s_write_chunk_len += LOG_RECORD_SIZE;
     s_total_records++;
 
-    /* Update tail */
-    __disable_irq();
-    s_queue_tail = (tail + LOG_RECORD_SIZE) % LOG_RAM_QUEUE_SIZE;
-    __enable_irq();
+    /* Advance local tail */
+    tail = (tail + LOG_RECORD_SIZE) % LOG_RAM_QUEUE_SIZE;
 
     /* If chunk is full, flush it */
     if (s_write_chunk_len >= LOG_WRITE_CHUNK_SIZE) {
       if (log_flush_write_chunk()) {
+        /* Update tail before returning */
+        s_queue_tail = tail;
         return;
       }
       break;  /* One chunk per tick to avoid blocking too long */
     }
   }
+
+  /* Publish new tail (atomic 32-bit write on ARM) */
+  s_queue_tail = tail;
 
   /* Periodic meta update */
   uint32_t now = HAL_GetTick();
@@ -278,12 +344,11 @@ void log_get_stats(log_stats_t *out) {
     return;
   }
 
-  __disable_irq();
+  /* These are diagnostic counters - volatile reads are sufficient */
   out->dropped_records = s_dropped_records;
   out->qspi_write_errors = s_qspi_write_errors;
   out->total_records = s_total_records;
   out->wrap_count = s_wrap_count;
-  __enable_irq();
 
   /* Calculate erase lag */
   uint32_t erase_addr = s_next_erase_addr;
@@ -299,7 +364,8 @@ void log_get_stats(log_stats_t *out) {
   if (s_total_records > 0) {
     /* Simplified estimate based on wrap count */
     uint32_t capacity_records = LOG_RING_SIZE / LOG_RECORD_SIZE;
-    out->fill_seconds = capacity_records / 400;  /* Assume 400 Hz */
+    uint32_t rate_hz = (s_log_rate_hz > 0U) ? s_log_rate_hz : 1U;
+    out->fill_seconds = capacity_records / rate_hz;
   } else {
     out->fill_seconds = 0;
   }
@@ -308,6 +374,10 @@ void log_get_stats(log_stats_t *out) {
 uint32_t log_get_write_addr(void) { return s_write_addr; }
 
 uint32_t log_get_seq(void) { return s_next_seq; }
+
+uint32_t log_get_fields_mask(void) { return s_log_fields_mask; }
+
+uint16_t log_get_rate_hz(void) { return s_log_rate_hz; }
 
 /* Internal functions */
 
@@ -410,7 +480,7 @@ static bool log_save_meta(void) {
   memcpy(meta.magic, LOG_META_MAGIC, 8);
   meta.version = LOG_META_VERSION;
   meta.record_size = LOG_RECORD_SIZE;
-  meta.rate_hz = 400;  /* TODO: Get from params */
+  meta.rate_hz = s_log_rate_hz;
   meta.log_fields_mask = s_log_fields_mask;
   meta.ring_start = LOG_RING_START;
   meta.ring_size = LOG_RING_SIZE;
@@ -418,7 +488,7 @@ static bool log_save_meta(void) {
   meta.wrap_count = s_wrap_count;
   meta.boot_count = s_boot_count;
   meta.last_dump_id = s_last_dump_id;
-  meta.sequence = ++s_meta_sequence;
+  meta.sequence = s_meta_sequence++;  /* Post-increment: use current, then increment */
 
   /* Compute CRC */
   meta.meta_crc32 =
@@ -480,4 +550,18 @@ static void log_format_meta(void) {
 
   /* Save initial metadata */
   log_save_meta();
+}
+
+static uint16_t log_rate_from_params(const robot_params_t *params) {
+  float rate_hz = CONTROL_DEFAULT_HZ;
+  if (params != NULL && params->control_rate_hz > 1e-3f) {
+    rate_hz = params->control_rate_hz;
+  }
+  if (rate_hz < 1.0f) {
+    rate_hz = 1.0f;
+  }
+  if (rate_hz > (float)UINT16_MAX) {
+    rate_hz = (float)UINT16_MAX;
+  }
+  return (uint16_t)(rate_hz + 0.5f);
 }

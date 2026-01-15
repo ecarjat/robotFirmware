@@ -24,7 +24,6 @@
 #define APP_IMU_CALIB_IMU_COUNT 2U
 #define APP_IMU_CALIB_DEFAULT_SAMPLES 800U
 #define APP_IMU_CALIB_MAX_SAMPLES 800U
-#define APP_IMU_CALIB_TIMEOUT_MS 3000U
 #define APP_IMU_ACCEL_RANGE_G 4.0f
 #define APP_IMU_GYRO_RANGE_DPS 500.0f
 
@@ -130,7 +129,7 @@ void app_imu_init() {
      * valid data-ready interrupt. On cold boot, sensors may need
      * additional settling time before DMA reads succeed reliably.
      */
-    HAL_Delay(100);
+    HAL_Delay(APP_IMU_BOOT_STABILIZE_MS);
 
     imu_bus_set_ready(1U);
 #define SENSOR_REQUEST_ENTRY(name, short_name, prefix)                         \

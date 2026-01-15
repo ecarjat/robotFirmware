@@ -69,9 +69,49 @@ bool log_dump_last_seconds(uint32_t seconds) {
     return false;
   }
 
+  /* Log current blackbox stats for debugging */
+  log_stats_t stats;
+  log_get_stats(&stats);
+  APP_LOG_INFO("Dump requested: %lu sec, blackbox stats: total=%lu dropped=%lu qspi_err=%lu",
+               (unsigned long)seconds, (unsigned long)stats.total_records,
+               (unsigned long)stats.dropped_records, (unsigned long)stats.qspi_write_errors);
+
+  /* Debug: log writer tick blocking reasons (defined in blackbox.c) */
+  extern uint32_t s_writer_debug_counter;
+  extern uint32_t s_writer_not_init;
+  extern uint32_t s_writer_busy;
+  extern uint32_t s_writer_dumping;
+  extern uint32_t s_writer_not_idle;
+  extern uint32_t s_writer_queue_empty;
+  extern uint32_t s_writer_flush_ok;
+  extern uint32_t s_writer_flush_fail;
+  APP_LOG_INFO("Writer debug: ticks=%lu not_init=%lu busy=%lu dumping=%lu not_idle=%lu",
+               (unsigned long)s_writer_debug_counter, (unsigned long)s_writer_not_init,
+               (unsigned long)s_writer_busy, (unsigned long)s_writer_dumping,
+               (unsigned long)s_writer_not_idle);
+  APP_LOG_INFO("Writer queue: empty=%lu flush_ok=%lu flush_fail=%lu",
+               (unsigned long)s_writer_queue_empty, (unsigned long)s_writer_flush_ok,
+               (unsigned long)s_writer_flush_fail);
+
   /* Calculate dump window */
   if (!dump_calculate_window(seconds)) {
     return false;
+  }
+
+  /* Debug: Read first 16 bytes from QSPI at start address to verify content */
+  {
+    uint8_t qspi_sample[16];
+    if (qspi_w25q64_read(s_dump_ctx.start_addr, qspi_sample, sizeof(qspi_sample))) {
+      APP_LOG_INFO("QSPI sample at 0x%06lX: %02X %02X %02X %02X %02X %02X %02X %02X",
+                   (unsigned long)s_dump_ctx.start_addr,
+                   qspi_sample[0], qspi_sample[1], qspi_sample[2], qspi_sample[3],
+                   qspi_sample[4], qspi_sample[5], qspi_sample[6], qspi_sample[7]);
+      /* Check for expected magic (0xA55A = 5A A5 in little-endian bytes) */
+      uint16_t magic = qspi_sample[0] | (qspi_sample[1] << 8);
+      APP_LOG_INFO("First record magic: 0x%04X (expected 0xA55A)", magic);
+    } else {
+      APP_LOG_ERROR("QSPI read failed at 0x%06lX", (unsigned long)s_dump_ctx.start_addr);
+    }
   }
 
   /* Generate filename */
@@ -119,8 +159,8 @@ void log_dump_tick(void) {
         memcpy(s_dump_meta.magic, LOG_META_MAGIC, 8);
         s_dump_meta.version = LOG_META_VERSION;
         s_dump_meta.record_size = LOG_RECORD_SIZE;
-        s_dump_meta.rate_hz = 400;
-        s_dump_meta.log_fields_mask = 0;  /* TODO: Get from blackbox */
+        s_dump_meta.rate_hz = log_get_rate_hz();
+        s_dump_meta.log_fields_mask = log_get_fields_mask();
         s_dump_meta.ring_start = LOG_RING_START;
         s_dump_meta.ring_size = LOG_RING_SIZE;
         s_dump_meta.write_addr = log_get_write_addr();
@@ -267,7 +307,10 @@ void log_dump_tick(void) {
       break;
 
     case DUMP_DONE:
-      /* Dump complete - reset to idle after one tick */
+      /* Dump complete */
+      APP_LOG_INFO("Dump complete: %s (%lu bytes)",
+                   s_dump_ctx.filename,
+                   (unsigned long)s_dump_ctx.bytes_written);
       dump_reset_context();
       break;
   }
@@ -300,8 +343,12 @@ static bool dump_calculate_window(uint32_t seconds) {
   uint32_t write_addr = log_get_write_addr();
   uint32_t current_seq = log_get_seq();
 
-  /* Calculate bytes for time window */
-  uint32_t records = seconds * 400U;  /* 400 Hz log rate */
+  /* Calculate bytes for time window using actual log rate */
+  uint16_t rate_hz = log_get_rate_hz();
+  if (rate_hz == 0) {
+    rate_hz = 1;  /* Fallback to prevent division by zero */
+  }
+  uint32_t records = seconds * (uint32_t)rate_hz;
   uint32_t bytes = records * LOG_RECORD_SIZE;
 
   /* Clamp to ring size */
@@ -329,12 +376,60 @@ static bool dump_calculate_window(uint32_t seconds) {
   s_dump_ctx.start_seq = (current_seq >= records) ? (current_seq - records) : 0;
   s_dump_ctx.end_seq = current_seq;
 
+  APP_LOG_INFO("Dump window: write_addr=0x%06lX, start=0x%06lX, bytes=%lu, records=%lu, seq=%lu, rate=%u Hz",
+               (unsigned long)write_addr, (unsigned long)start_addr,
+               (unsigned long)bytes, (unsigned long)records,
+               (unsigned long)current_seq, (unsigned)rate_hz);
+
+  /* Warn if no data to dump */
+  if (write_addr == LOG_RING_START || current_seq == 0) {
+    APP_LOG_WARN("Dump requested but no records written yet (write_addr=0x%06lX, seq=%lu)",
+                 (unsigned long)write_addr, (unsigned long)current_seq);
+  }
+
   return true;
 }
 
 static bool dump_generate_filename(void) {
-  /* Increment dump ID */
-  s_dump_ctx.last_dump_id++;
+  DIR dir;
+  FILINFO fno;
+  FRESULT res;
+  uint32_t max_id = 0;
+
+  /* Scan SD card root for existing DUMP_*.BIN files */
+  res = f_opendir(&dir, "/");
+  if (res == FR_OK) {
+    for (;;) {
+      res = f_readdir(&dir, &fno);
+      if (res != FR_OK || fno.fname[0] == 0) {
+        break;  /* End of directory or error */
+      }
+
+      /* Check if filename matches DUMP_NNNN.BIN pattern */
+      if (strncmp(fno.fname, "DUMP_", 5) == 0 &&
+          strlen(fno.fname) == 13 &&
+          strcmp(fno.fname + 9, ".BIN") == 0) {
+        /* Extract number from filename */
+        uint32_t id = 0;
+        for (int i = 5; i < 9; i++) {
+          char c = fno.fname[i];
+          if (c >= '0' && c <= '9') {
+            id = id * 10 + (c - '0');
+          } else {
+            id = 0;  /* Invalid format, skip */
+            break;
+          }
+        }
+        if (id > max_id) {
+          max_id = id;
+        }
+      }
+    }
+    f_closedir(&dir);
+  }
+
+  /* Use next sequential number */
+  s_dump_ctx.last_dump_id = max_id + 1;
 
   /* Generate filename: DUMP_0001.BIN */
   int ret = snprintf(s_dump_ctx.filename, sizeof(s_dump_ctx.filename),
@@ -343,6 +438,9 @@ static bool dump_generate_filename(void) {
   if (ret < 0 || ret >= (int)sizeof(s_dump_ctx.filename)) {
     return false;
   }
+
+  APP_LOG_INFO("Next dump file: %s (found %lu existing)",
+               s_dump_ctx.filename, (unsigned long)max_id);
 
   return true;
 }

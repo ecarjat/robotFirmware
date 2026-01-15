@@ -34,9 +34,6 @@
 #include "logging/blackbox_dump.h"
 #include "qspi_w25q64.h"
 
-#define APP_HEARTBEAT_TIMEOUT_MS 200U
-#define APP_LOG_PERIOD_MS 500U
-
 #define ROBOT_USE_HW_CRC 1
 
 static void app_init(void);
@@ -74,9 +71,12 @@ void app_main(void) {
     app_profiling_record(APP_PROF_IMU, start);
 
     /* 3. Background Tasks (Telemetry, Logging, LED, etc.) */
-    start = APP_PROFILE_GET_TIME();
-    app_idle_tick();
-    app_profiling_record(APP_PROF_IDLE, start);
+    uint32_t idle_budget_us = control_timer_time_to_deadline_us();
+    if (!control_timer_pending() && idle_budget_us >= APP_IDLE_BUDGET_US) {
+      start = APP_PROFILE_GET_TIME();
+      app_idle_tick();
+      app_profiling_record(APP_PROF_IDLE, start);
+    }
   }
 }
 
@@ -99,7 +99,7 @@ volatile uint8_t g_estop_active = 0U;
 static void app_init(void) {
   WDOG_CHECKPOINT(WDOG_CP_APP_INIT_START);
   /* Short delay for sensor power stabilization */
-  HAL_Delay(3000);
+  HAL_Delay(APP_POWER_SETTLE_DELAY_MS);
   APP_LOG_INFO("Booting robot firmware (frame v%u)", ROBOT_FRAME_VERSION);
   APP_LOG_INFO("CMD channel id: %u", ROBOT_CHANNEL_CMD);
 
@@ -174,7 +174,7 @@ static void app_idle_tick(void) {
     uint8_t mode = g_reboot_request;
     g_reboot_request = 0U;
     APP_LOG_INFO("Reboot requested (mode=%u)", (unsigned int)mode);
-    app_log_flush_blocking(2000U);
+    app_log_flush_blocking(APP_LOG_FLUSH_TIMEOUT_MS);
     if (mode == 1U) {
       system_reboot_to_bootloader();
     } else {

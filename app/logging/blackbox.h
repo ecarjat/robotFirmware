@@ -11,7 +11,9 @@ extern "C" {
 #include <stdint.h>
 
 /* Configuration */
-#define LOG_RAM_QUEUE_SIZE  (256 * 1024)  /* 256 KB RAM queue (~3s @ 400Hz) */
+/* Queue size MUST be a multiple of LOG_RECORD_SIZE (160) to avoid wrap issues */
+#define LOG_RAM_QUEUE_RECORDS  1600U      /* ~4s @ 400Hz */
+#define LOG_RAM_QUEUE_SIZE  (LOG_RAM_QUEUE_RECORDS * 160U)  /* 256,000 bytes */
 #define LOG_WRITE_CHUNK_SIZE  4096U       /* Write in 4 KB chunks (page-aligned) */
 #define LOG_PREERASE_AHEAD  8U            /* Sectors to pre-erase ahead (32 KB) */
 #define LOG_META_UPDATE_PERIOD_MS  1000U  /* Update meta every 1 second */
@@ -100,6 +102,20 @@ uint32_t log_get_write_addr(void);
  * @return Next sequence number to be assigned
  */
 uint32_t log_get_seq(void);
+
+/**
+ * @brief Get active log fields mask
+ *
+ * @return Bitmask of LOGF_* fields
+ */
+uint32_t log_get_fields_mask(void);
+
+/**
+ * @brief Get configured log rate in Hz
+ *
+ * @return Log rate in Hz
+ */
+uint16_t log_get_rate_hz(void);
 
 #ifdef __cplusplus
 }

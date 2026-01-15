@@ -33,7 +33,6 @@ static volatile uint8_t s_async_error_reported = 0;
 static bool qspi_wait_ready(uint32_t timeout_ms);
 static bool qspi_write_enable(void);
 static void qspi_cache_clean(const void *addr, size_t len);
-static void qspi_cache_invalidate(void *addr, size_t len);
 static void qspi_log_ospi_error(const char *op, HAL_StatusTypeDef status);
 static bool qspi_async_start_page(void);
 
@@ -88,13 +87,22 @@ bool qspi_w25q64_read(uint32_t addr, uint8_t *buf, size_t len) {
     return false;
   }
 
-  /* Receive data */
+  /* Receive data (polling mode - CPU writes directly to cache) */
   if (HAL_OSPI_Receive(&hospi1, buf, HAL_OSPI_TIMEOUT_DEFAULT_VALUE) != HAL_OK) {
     return false;
   }
 
-  /* Invalidate D-Cache for DMA coherency */
-  qspi_cache_invalidate(buf, len);
+  /*
+   * NOTE: Do NOT invalidate cache here. HAL_OSPI_Receive() uses polling mode
+   * where the CPU reads from the peripheral and writes to the buffer. The data
+   * is now in the CPU's cache. Invalidating would discard it!
+   *
+   * Cache invalidation is only needed after DMA writes to memory (so CPU can
+   * see DMA's data). For polling, the CPU already has the data.
+   *
+   * Callers that pass this buffer to DMA (e.g., SD card write) must call
+   * SCB_CleanDCache_by_Addr() to flush cache to RAM before DMA reads.
+   */
 
   return true;
 }
@@ -502,19 +510,6 @@ static void qspi_cache_clean(const void *addr, size_t len) {
 
   SCB_CleanDCache_by_Addr((uint32_t *)aligned_start,
                           (int32_t)(aligned_end - aligned_start));
-}
-
-static void qspi_cache_invalidate(void *addr, size_t len) {
-  if (len == 0) return;
-
-  /* Align to 32-byte cache line boundary */
-  uintptr_t start = (uintptr_t)addr;
-  uintptr_t end = start + len;
-  uintptr_t aligned_start = start & ~(uintptr_t)(32U - 1U);
-  uintptr_t aligned_end = (end + (32U - 1U)) & ~(uintptr_t)(32U - 1U);
-
-  SCB_InvalidateDCache_by_Addr((uint32_t *)aligned_start,
-                               (int32_t)(aligned_end - aligned_start));
 }
 
 static void qspi_log_ospi_error(const char *op, HAL_StatusTypeDef status) {

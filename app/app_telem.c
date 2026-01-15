@@ -14,8 +14,7 @@
 #include "stm32h7xx_hal.h"
 #include "config_control.h"
 
-#define APP_TELEM_PERIOD_MS 500U
-#define TELEM_FAIL_THRESHOLD 3U
+
 
 static uint32_t s_last_telem_ms = 0U;
 static uint32_t s_telem_fail_count = 0U;

@@ -3,7 +3,7 @@
 #include <math.h>
 
 #include "config_control.h"
-#include "log.h"
+#include "app_config.h"
 
 extern "C" {
 #include "../app/logging/blackbox_dump.h"
@@ -12,8 +12,7 @@ extern "C" {
 
 extern robot_params_t g_robot_params;
 
-#define MOTION_LOG_ERROR(fmt, ...) \
-    app_log_printf("[APP][ERROR] " fmt "\r\n", ##__VA_ARGS__)
+#define MOTION_LOG_ERROR(...) APP_LOG_ERROR(__VA_ARGS__)
 
 static volatile motion_mode_t s_mode = MOTION_MODE_DISARMED;
 

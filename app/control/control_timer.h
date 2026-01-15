@@ -80,6 +80,12 @@ void control_timer_reset_diag(void);
  */
 void control_timer_isr_callback(void);
 
+/**
+ * Get time remaining until next control period deadline.
+ * Returns 0 if timing is not initialized or deadline already passed.
+ */
+uint32_t control_timer_time_to_deadline_us(void);
+
 #ifdef __cplusplus
 }
 #endif
