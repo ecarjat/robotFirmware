@@ -107,13 +107,21 @@ typedef enum {
 bool qspi_w25q64_write_async_start(uint32_t addr, const uint8_t *buf, size_t len);
 
 /**
- * @brief Advance async write state machine
+ * @brief Advance async state machine (writes/erases)
  *
- * Call periodically from the main loop to progress an async write.
+ * Call periodically from the main loop to progress any async operation.
  *
- * @return Current async write state
+ * @return Current async state
  */
 qspi_w25q64_async_state_t qspi_w25q64_write_async_tick(void);
+
+/**
+ * @brief Start an async 4 KB sector erase (non-blocking)
+ *
+ * @param addr Sector start address (must be 4KB-aligned)
+ * @return true if the erase was accepted, false otherwise
+ */
+bool qspi_w25q64_erase_sector_async_start(uint32_t addr);
 
 /**
  * @brief Erase 4 KB sector

@@ -20,7 +20,14 @@ typedef enum {
   QSPI_ASYNC_ERROR
 } qspi_async_state_t;
 
+typedef enum {
+  QSPI_ASYNC_OP_NONE = 0,
+  QSPI_ASYNC_OP_WRITE,
+  QSPI_ASYNC_OP_ERASE_4K
+} qspi_async_op_t;
+
 static volatile qspi_async_state_t s_async_state = QSPI_ASYNC_IDLE;
+static volatile qspi_async_op_t s_async_op = QSPI_ASYNC_OP_NONE;
 static uint32_t s_async_addr = 0;
 static const uint8_t *s_async_buf = NULL;
 static size_t s_async_remaining = 0;
@@ -203,6 +210,7 @@ bool qspi_w25q64_write_async_start(uint32_t addr, const uint8_t *buf, size_t len
     return false;
   }
 
+  s_async_op = QSPI_ASYNC_OP_WRITE;
   s_async_addr = addr;
   s_async_buf = buf;
   s_async_remaining = len;
@@ -223,6 +231,11 @@ qspi_w25q64_async_state_t qspi_w25q64_write_async_tick(void) {
 
   switch (s_async_state) {
     case QSPI_ASYNC_START:
+      if (s_async_op != QSPI_ASYNC_OP_WRITE) {
+        s_async_error_status = HAL_ERROR;
+        s_async_state = QSPI_ASYNC_ERROR;
+        break;
+      }
       if ((qspi_w25q64_read_status() & W25Q64_SR_BUSY) != 0U) {
         break;
       }
@@ -232,6 +245,11 @@ qspi_w25q64_async_state_t qspi_w25q64_write_async_tick(void) {
       break;
 
     case QSPI_ASYNC_WAIT_TX:
+      if (s_async_op != QSPI_ASYNC_OP_WRITE) {
+        s_async_error_status = HAL_ERROR;
+        s_async_state = QSPI_ASYNC_ERROR;
+        break;
+      }
       if (s_async_tx_done ||
           HAL_OSPI_GetState(&hospi1) == HAL_OSPI_STATE_READY) {
         s_async_tx_done = 0;
@@ -241,6 +259,10 @@ qspi_w25q64_async_state_t qspi_w25q64_write_async_tick(void) {
 
     case QSPI_ASYNC_WAIT_WIP:
       if ((qspi_w25q64_read_status() & W25Q64_SR_BUSY) != 0U) {
+        break;
+      }
+      if (s_async_op == QSPI_ASYNC_OP_ERASE_4K) {
+        s_async_state = QSPI_ASYNC_DONE;
         break;
       }
       s_async_addr += s_async_chunk;
@@ -263,24 +285,94 @@ qspi_w25q64_async_state_t qspi_w25q64_write_async_tick(void) {
 
   if (s_async_state == QSPI_ASYNC_ERROR && !s_async_error_reported) {
     s_async_error_reported = 1;
-    qspi_log_ospi_error("async write", s_async_error_status);
+    qspi_log_ospi_error(
+        (s_async_op == QSPI_ASYNC_OP_ERASE_4K) ? "async erase" : "async write",
+        s_async_error_status);
   }
 
   if (s_async_state == QSPI_ASYNC_DONE) {
     s_async_state = QSPI_ASYNC_IDLE;
+    s_async_op = QSPI_ASYNC_OP_NONE;
     return QSPI_W25Q64_ASYNC_DONE;
   }
 
   if (s_async_state == QSPI_ASYNC_ERROR) {
     s_async_state = QSPI_ASYNC_IDLE;
+    s_async_op = QSPI_ASYNC_OP_NONE;
     return QSPI_W25Q64_ASYNC_ERROR;
   }
 
   if (s_async_state == QSPI_ASYNC_IDLE) {
+    s_async_op = QSPI_ASYNC_OP_NONE;
     return QSPI_W25Q64_ASYNC_IDLE;
   }
 
   return QSPI_W25Q64_ASYNC_BUSY;
+}
+
+bool qspi_w25q64_erase_sector_async_start(uint32_t addr) {
+  if (!s_initialized) {
+    return false;
+  }
+
+  if (addr >= W25Q64_FLASH_SIZE) {
+    return false;
+  }
+
+  /* Align to sector boundary */
+  addr &= ~(W25Q64_SECTOR_SIZE - 1);
+
+  if (s_async_state == QSPI_ASYNC_START ||
+      s_async_state == QSPI_ASYNC_WAIT_TX ||
+      s_async_state == QSPI_ASYNC_WAIT_WIP) {
+    return false;
+  }
+
+  if ((qspi_w25q64_read_status() & W25Q64_SR_BUSY) != 0U) {
+    return false;
+  }
+
+  /* Enable write */
+  if (!qspi_write_enable()) {
+    return false;
+  }
+
+  /* Configure command for sector erase */
+  OSPI_RegularCmdTypeDef cmd = {0};
+  cmd.OperationType = HAL_OSPI_OPTYPE_COMMON_CFG;
+  cmd.FlashId = HAL_OSPI_FLASH_ID_1;
+  cmd.Instruction = W25Q64_CMD_SECTOR_ERASE_4K;
+  cmd.InstructionMode = HAL_OSPI_INSTRUCTION_1_LINE;
+  cmd.InstructionSize = HAL_OSPI_INSTRUCTION_8_BITS;
+  cmd.InstructionDtrMode = HAL_OSPI_INSTRUCTION_DTR_DISABLE;
+  cmd.Address = addr;
+  cmd.AddressMode = HAL_OSPI_ADDRESS_1_LINE;
+  cmd.AddressSize = HAL_OSPI_ADDRESS_24_BITS;
+  cmd.AddressDtrMode = HAL_OSPI_ADDRESS_DTR_DISABLE;
+  cmd.AlternateBytesMode = HAL_OSPI_ALTERNATE_BYTES_NONE;
+  cmd.DataMode = HAL_OSPI_DATA_NONE;
+  cmd.DummyCycles = 0;
+  cmd.DQSMode = HAL_OSPI_DQS_DISABLE;
+  cmd.SIOOMode = HAL_OSPI_SIOO_INST_EVERY_CMD;
+
+  HAL_StatusTypeDef status =
+      HAL_OSPI_Command(&hospi1, &cmd, HAL_OSPI_TIMEOUT_DEFAULT_VALUE);
+  if (status != HAL_OK) {
+    qspi_log_ospi_error("erase async", status);
+    return false;
+  }
+
+  s_async_op = QSPI_ASYNC_OP_ERASE_4K;
+  s_async_state = QSPI_ASYNC_WAIT_WIP;
+  s_async_error_status = HAL_OK;
+  s_async_error_reported = 0;
+  s_async_addr = addr;
+  s_async_chunk = 0;
+  s_async_remaining = 0;
+  s_async_buf = NULL;
+  s_async_tx_done = 0;
+
+  return true;
 }
 
 bool qspi_w25q64_erase_sector_4k(uint32_t addr) {

@@ -50,6 +50,24 @@ static uint32_t s_boot_count = 0;
 static uint32_t s_last_dump_id = 0;
 static uint32_t s_meta_sequence = 0;
 
+typedef enum {
+  LOG_META_SAVE_IDLE = 0,
+  LOG_META_SAVE_ERASE,
+  LOG_META_SAVE_WRITE
+} log_meta_save_state_t;
+
+typedef enum {
+  LOG_META_OP_NONE = 0,
+  LOG_META_OP_ERASE,
+  LOG_META_OP_WRITE
+} log_meta_op_t;
+
+static log_meta_save_state_t s_meta_save_state = LOG_META_SAVE_IDLE;
+static log_meta_op_t s_meta_op_inflight = LOG_META_OP_NONE;
+static uint32_t s_meta_slot_addr = LOG_META_SLOT0;
+static LogMeta s_meta_pending
+    __attribute__((section(".dma_buffer"), aligned(32)));
+
 /* Statistics */
 static uint32_t s_qspi_write_errors = 0;
 
@@ -84,6 +102,7 @@ static void log_format_meta(void);
 static bool log_flush_write_chunk(void);
 static void log_advance_write_addr_after_chunk(void);
 static uint16_t log_rate_from_params(const robot_params_t *params);
+static void log_meta_tick(qspi_w25q64_async_state_t async_state);
 
 void log_init(const robot_params_t *params) {
   if (s_initialized) {
@@ -211,6 +230,11 @@ void log_writer_tick(void) {
     }
   }
 
+  log_meta_tick(async_state);
+  if (s_meta_op_inflight != LOG_META_OP_NONE) {
+    return;
+  }
+
   if (log_is_dumping()) {
     return;
   }
@@ -290,8 +314,9 @@ void log_writer_tick(void) {
   /* Periodic meta update */
   uint32_t now = HAL_GetTick();
   if (now - s_last_meta_update_ms >= LOG_META_UPDATE_PERIOD_MS) {
-    log_save_meta();
-    s_last_meta_update_ms = now;
+    if (log_save_meta()) {
+      s_last_meta_update_ms = now;
+    }
   }
 }
 
@@ -318,7 +343,7 @@ void log_erase_tick(void) {
 
   /* Erase if we're falling behind */
   if (sectors_ahead < LOG_PREERASE_AHEAD) {
-    if (qspi_w25q64_erase_sector_4k(s_next_erase_addr)) {
+    if (qspi_w25q64_erase_sector_async_start(s_next_erase_addr)) {
       /* Advance to next sector */
       s_next_erase_addr += W25Q64_SECTOR_SIZE;
       if (s_next_erase_addr >= LOG_RING_END) {
@@ -464,38 +489,80 @@ static bool log_load_meta(void) {
 }
 
 static bool log_save_meta(void) {
-  LogMeta meta;
-  memset(&meta, 0, sizeof(meta));
-
-  /* Populate metadata */
-  memcpy(meta.magic, LOG_META_MAGIC, 8);
-  meta.version = LOG_META_VERSION;
-  meta.record_size = LOG_RECORD_SIZE;
-  meta.rate_hz = s_log_rate_hz;
-  meta.log_fields_mask = s_log_fields_mask;
-  meta.ring_start = LOG_RING_START;
-  meta.ring_size = LOG_RING_SIZE;
-  meta.write_addr = s_write_addr;
-  meta.wrap_count = s_wrap_count;
-  meta.boot_count = s_boot_count;
-  meta.last_dump_id = s_last_dump_id;
-  meta.sequence = s_meta_sequence++;  /* Post-increment: use current, then increment */
-
-  /* Compute CRC */
-  meta.meta_crc32 =
-      robot_crc32((const uint8_t *)&meta, sizeof(LogMeta) - sizeof(uint32_t));
-
-  /* Write to alternating slot */
-  uint32_t slot_addr = (meta.sequence % 2 == 0) ? LOG_META_SLOT0 : LOG_META_SLOT1;
-
-  /* Erase slot first if needed */
-  if ((meta.sequence % 2) == 0) {
-    /* Erase the entire meta sector before writing slot 0 again */
-    qspi_w25q64_erase_sector_4k(LOG_META_START);
+  if (s_meta_save_state != LOG_META_SAVE_IDLE ||
+      s_meta_op_inflight != LOG_META_OP_NONE) {
+    return false;
   }
 
-  return qspi_w25q64_write_page(slot_addr, (const uint8_t *)&meta,
-                                  sizeof(LogMeta));
+  LogMeta *meta = &s_meta_pending;
+  memset(meta, 0, sizeof(*meta));
+
+  /* Populate metadata */
+  memcpy(meta->magic, LOG_META_MAGIC, 8);
+  meta->version = LOG_META_VERSION;
+  meta->record_size = LOG_RECORD_SIZE;
+  meta->rate_hz = s_log_rate_hz;
+  meta->log_fields_mask = s_log_fields_mask;
+  meta->ring_start = LOG_RING_START;
+  meta->ring_size = LOG_RING_SIZE;
+  meta->write_addr = s_write_addr;
+  meta->wrap_count = s_wrap_count;
+  meta->boot_count = s_boot_count;
+  meta->last_dump_id = s_last_dump_id;
+  meta->sequence = s_meta_sequence++;  /* Post-increment: use current, then increment */
+
+  /* Compute CRC */
+  meta->meta_crc32 =
+      robot_crc32((const uint8_t *)meta, sizeof(LogMeta) - sizeof(uint32_t));
+
+  /* Write to alternating slot */
+  s_meta_slot_addr = (meta->sequence % 2 == 0) ? LOG_META_SLOT0 : LOG_META_SLOT1;
+  s_meta_save_state =
+      ((meta->sequence % 2) == 0) ? LOG_META_SAVE_ERASE : LOG_META_SAVE_WRITE;
+
+  return true;
+}
+
+static void log_meta_tick(qspi_w25q64_async_state_t async_state) {
+  if (s_meta_save_state == LOG_META_SAVE_IDLE) {
+    return;
+  }
+
+  if (s_meta_op_inflight != LOG_META_OP_NONE) {
+    if (async_state == QSPI_W25Q64_ASYNC_DONE) {
+      if (s_meta_op_inflight == LOG_META_OP_ERASE) {
+        s_meta_op_inflight = LOG_META_OP_NONE;
+        s_meta_save_state = LOG_META_SAVE_WRITE;
+      } else {
+        s_meta_op_inflight = LOG_META_OP_NONE;
+        s_meta_save_state = LOG_META_SAVE_IDLE;
+      }
+    } else if (async_state == QSPI_W25Q64_ASYNC_ERROR) {
+      s_meta_op_inflight = LOG_META_OP_NONE;
+      s_meta_save_state = LOG_META_SAVE_IDLE;
+    }
+    return;
+  }
+
+  if (s_write_state != LOG_WRITE_IDLE) {
+    return;
+  }
+
+  if (qspi_w25q64_is_busy()) {
+    return;
+  }
+
+  if (s_meta_save_state == LOG_META_SAVE_ERASE) {
+    if (qspi_w25q64_erase_sector_async_start(LOG_META_START)) {
+      s_meta_op_inflight = LOG_META_OP_ERASE;
+    }
+  } else if (s_meta_save_state == LOG_META_SAVE_WRITE) {
+    if (qspi_w25q64_write_async_start(s_meta_slot_addr,
+                                     (const uint8_t *)&s_meta_pending,
+                                     sizeof(s_meta_pending))) {
+      s_meta_op_inflight = LOG_META_OP_WRITE;
+    }
+  }
 }
 
 static bool log_validate_meta(const LogMeta *meta) {
@@ -542,15 +609,14 @@ static bool log_validate_meta(const LogMeta *meta) {
 }
 
 static void log_format_meta(void) {
-  /* Erase metadata sector */
-  qspi_w25q64_erase_sector_4k(LOG_META_START);
-
   /* Initialize state */
   s_write_addr = LOG_RING_START;
   s_wrap_count = 0;
   s_boot_count = 0;
   s_last_dump_id = 0;
   s_meta_sequence = 0;
+  s_meta_save_state = LOG_META_SAVE_IDLE;
+  s_meta_op_inflight = LOG_META_OP_NONE;
 
   /* Save initial metadata */
   log_save_meta();
