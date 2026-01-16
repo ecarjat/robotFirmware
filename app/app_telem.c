@@ -8,6 +8,7 @@
 #include "app_link.h"
 #include "app_main.h"
 #include "led_status.h"
+#include "logging/blackbox_dump.h"
 #include "motion_control.h"
 #include "motor_link.h"
 #include "robot_protocol.h"
@@ -46,6 +47,9 @@ static void app_send_telem(void) {
   }
   if (motion_control_is_calibrated()) {
     telem.status |= ROBOT_STATUS_IMU_CAL;
+  }
+  if (log_is_dumping()) {
+    telem.status |= ROBOT_STATUS_DUMPING;
   }
 
   /* EKF state estimate */

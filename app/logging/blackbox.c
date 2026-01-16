@@ -169,21 +169,8 @@ void log_push_record(const LogRecord *rec) {
   s_queue_head = next_head;
 }
 
-/* Debug: track why writer isn't progressing (non-static for external access) */
-uint32_t s_writer_debug_counter = 0;
-uint32_t s_writer_not_init = 0;
-uint32_t s_writer_busy = 0;
-uint32_t s_writer_dumping = 0;
-uint32_t s_writer_not_idle = 0;
-uint32_t s_writer_queue_empty = 0;
-uint32_t s_writer_flush_ok = 0;
-uint32_t s_writer_flush_fail = 0;
-
 void log_writer_tick(void) {
-  s_writer_debug_counter++;
-
   if (!s_initialized) {
-    s_writer_not_init++;
     return;
   }
 
@@ -225,18 +212,15 @@ void log_writer_tick(void) {
   }
 
   if (log_is_dumping()) {
-    s_writer_dumping++;
     return;
   }
 
   /* Check if flash is busy */
   if (qspi_w25q64_is_busy()) {
-    s_writer_busy++;
     return;
   }
 
   if (s_write_state != LOG_WRITE_IDLE) {
-    s_writer_not_idle++;
     return;
   }
 
@@ -253,7 +237,6 @@ void log_writer_tick(void) {
     LOG_QUEUE_READ_BARRIER();
 
     if (tail == head) {
-      s_writer_queue_empty++;
       break;  /* Queue empty */
     }
 
@@ -275,12 +258,10 @@ void log_writer_tick(void) {
     if (space_in_chunk < LOG_RECORD_SIZE) {
       /* Chunk full - flush it */
       if (log_flush_write_chunk()) {
-        s_writer_flush_ok++;
         /* Update tail before returning */
         s_queue_tail = tail;
         return;
       }
-      s_writer_flush_fail++;
       space_in_chunk = LOG_WRITE_CHUNK_SIZE;
     }
 

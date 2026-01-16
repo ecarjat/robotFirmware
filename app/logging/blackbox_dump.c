@@ -72,51 +72,9 @@ bool log_dump_last_seconds(uint32_t seconds) {
     return false;
   }
 
-  /* Log current blackbox stats for debugging */
-  log_stats_t stats;
-  log_get_stats(&stats);
-  APP_LOG_INFO("Dump requested: %lu sec, blackbox stats: total=%lu dropped=%lu qspi_err=%lu",
-               (unsigned long)seconds, (unsigned long)stats.total_records,
-               (unsigned long)stats.dropped_records, (unsigned long)stats.qspi_write_errors);
-
-  /* Debug: log writer tick blocking reasons (defined in blackbox.c) */
-  extern uint32_t s_writer_debug_counter;
-  extern uint32_t s_writer_not_init;
-  extern uint32_t s_writer_busy;
-  extern uint32_t s_writer_dumping;
-  extern uint32_t s_writer_not_idle;
-  extern uint32_t s_writer_queue_empty;
-  extern uint32_t s_writer_flush_ok;
-  extern uint32_t s_writer_flush_fail;
-  APP_LOG_INFO("Writer debug: ticks=%lu not_init=%lu busy=%lu dumping=%lu not_idle=%lu",
-               (unsigned long)s_writer_debug_counter, (unsigned long)s_writer_not_init,
-               (unsigned long)s_writer_busy, (unsigned long)s_writer_dumping,
-               (unsigned long)s_writer_not_idle);
-  APP_LOG_INFO("Writer queue: empty=%lu flush_ok=%lu flush_fail=%lu",
-               (unsigned long)s_writer_queue_empty, (unsigned long)s_writer_flush_ok,
-               (unsigned long)s_writer_flush_fail);
-
   /* Calculate dump window */
   if (!dump_calculate_window(seconds)) {
     return false;
-  }
-
-  /* Debug: Read first 16 bytes from QSPI at start address to verify content */
-  {
-    uint8_t qspi_sample[16];
-    if (qspi_w25q64_is_busy()) {
-      APP_LOG_WARN("QSPI busy, sample skipped");
-    } else if (qspi_w25q64_read(s_dump_ctx.start_addr, qspi_sample, sizeof(qspi_sample))) {
-      APP_LOG_INFO("QSPI sample at 0x%06lX: %02X %02X %02X %02X %02X %02X %02X %02X",
-                   (unsigned long)s_dump_ctx.start_addr,
-                   qspi_sample[0], qspi_sample[1], qspi_sample[2], qspi_sample[3],
-                   qspi_sample[4], qspi_sample[5], qspi_sample[6], qspi_sample[7]);
-      /* Check for expected magic (0xA55A = 5A A5 in little-endian bytes) */
-      uint16_t magic = qspi_sample[0] | (qspi_sample[1] << 8);
-      APP_LOG_INFO("First record magic: 0x%04X (expected 0xA55A)", magic);
-    } else {
-      APP_LOG_ERROR("QSPI read failed at 0x%06lX", (unsigned long)s_dump_ctx.start_addr);
-    }
   }
 
   /* Generate filename */
@@ -353,8 +311,6 @@ static bool dump_calculate_window(uint32_t seconds) {
   uint32_t write_addr = log_get_write_addr();
   uint32_t boot_write_addr = log_get_boot_write_addr();
   uint32_t current_seq = log_get_seq();
-  log_stats_t stats;
-  log_get_stats(&stats);
 
   /* Compute how many bytes are actually committed to QSPI this session. */
   uint32_t bytes_written = 0;
@@ -365,9 +321,6 @@ static bool dump_calculate_window(uint32_t seconds) {
                     (write_addr - LOG_RING_START);
   }
   uint32_t records_written = bytes_written / LOG_RECORD_SIZE;
-  APP_LOG_INFO("Dump debug: committed bytes=%lu records=%lu (stats.total=%lu)",
-               (unsigned long)bytes_written, (unsigned long)records_written,
-               (unsigned long)stats.total_records);
 
   /* Determine how many records to dump */
   uint16_t rate_hz = log_get_rate_hz();
@@ -429,17 +382,6 @@ static bool dump_calculate_window(uint32_t seconds) {
   s_dump_ctx.record_count = records;
   s_dump_ctx.start_seq = (current_seq >= records) ? (current_seq - records) : 0;
   s_dump_ctx.end_seq = current_seq;
-
-  APP_LOG_INFO("Dump window: write_addr=0x%06lX, start=0x%06lX, bytes=%lu, records=%lu, seq=%lu, rate=%u Hz",
-               (unsigned long)write_addr, (unsigned long)start_addr,
-               (unsigned long)bytes, (unsigned long)records,
-               (unsigned long)current_seq, (unsigned)rate_hz);
-
-  /* Warn if no data to dump */
-  if (records_written == 0) {
-    APP_LOG_WARN("Dump requested but no records written yet (write_addr=0x%06lX, seq=%lu)",
-                 (unsigned long)write_addr, (unsigned long)current_seq);
-  }
 
   return true;
 }
@@ -513,7 +455,7 @@ static const char *dump_state_name(dump_state_t state) {
 }
 
 static void dump_advance_state(dump_state_t next_state) {
-  APP_LOG_INFO("Dump: %s -> %s", dump_state_name(s_dump_ctx.state),
+  APP_LOG_DEBUG("Dump: %s -> %s", dump_state_name(s_dump_ctx.state),
                dump_state_name(next_state));
   s_dump_ctx.state = next_state;
 }

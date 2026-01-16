@@ -24,6 +24,8 @@
 #define APP_LOG_LEVEL_ERROR 1U
 #define APP_LOG_LEVEL_WARN 2U
 #define APP_LOG_LEVEL_INFO 3U
+#define APP_LOG_LEVEL_DEBUG 4U
+
 
 #ifndef APP_LOG_LEVEL
 #ifdef NDEBUG
@@ -54,6 +56,21 @@ extern CRC_HandleTypeDef hcrc;
 #define APP_LINK_UART (&huart2)
 #define APP_MOTOR_LEFT_UART (&huart6)
 #define APP_MOTOR_RIGHT_UART (&huart1)
+
+
+#if APP_LOG_LEVEL >= APP_LOG_LEVEL_DEBUG
+#define APP_LOG_DEBUG(fmt, ...)                                                 \
+  app_log_printf("[APP][DEBUG] " fmt "\r\n", ##__VA_ARGS__)
+#else
+#define APP_LOG_DEBUG(fmt, ...)                                                 \
+  do                                                                           \
+  {                                                                            \
+    if (0)                                                                     \
+    {                                                                          \
+      app_log_printf(fmt, ##__VA_ARGS__);                                      \
+    }                                                                          \
+  } while (0)
+#endif
 
 #if APP_LOG_LEVEL >= APP_LOG_LEVEL_INFO
 #define APP_LOG_INFO(fmt, ...)                                                 \
