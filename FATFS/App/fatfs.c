@@ -20,8 +20,8 @@
 
 uint8_t retSD;    /* Return value for SD */
 char SDPath[4];   /* SD logical drive path */
-FATFS SDFatFS __attribute__((section(".dma_buffer"), aligned(32)));
-FIL SDFile __attribute__((section(".dma_buffer"), aligned(32)));
+FATFS SDFatFS __attribute__((section(".dma_buffer"), aligned(32)));    /* File system object for SD logical drive */
+FIL SDFile __attribute__((section(".dma_buffer"), aligned(32)));       /* File object for SD */
 
 /* USER CODE BEGIN Variables */
 

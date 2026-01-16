@@ -18,6 +18,7 @@
 
 #include "debug_wdog.h"
 
+#include "fatfs.h"
 #include "imu_sched.h"
 #include "motion_control.h"
 #include "motor_link.h"
@@ -102,6 +103,7 @@ static void app_init(void) {
   HAL_Delay(APP_POWER_SETTLE_DELAY_MS);
   APP_LOG_INFO("Booting robot firmware (frame v%u)", ROBOT_FRAME_VERSION);
   APP_LOG_INFO("CMD channel id: %u", ROBOT_CHANNEL_CMD);
+  APP_LOG_DEBUG("SDCard Present: %s", BSP_PlatformIsDetected()==SD_NOT_PRESENT?"False":"True");
 
   /* Load robot parameters from flash (or use defaults) */
   param_storage_init();

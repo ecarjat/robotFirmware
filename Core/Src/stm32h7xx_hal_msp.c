@@ -369,7 +369,6 @@ void HAL_OSPI_MspInit(OSPI_HandleTypeDef* hospi)
     hmdma_octospi1_fifo_th.Init.SourceDataSize = MDMA_SRC_DATASIZE_BYTE;
     hmdma_octospi1_fifo_th.Init.DestDataSize = MDMA_DEST_DATASIZE_WORD;
     hmdma_octospi1_fifo_th.Init.DataAlignment = MDMA_DATAALIGN_PACKENABLE;
-    /* Must match OCTOSPI FIFO threshold (hospi1.Init.FifoThreshold = 16). */
     hmdma_octospi1_fifo_th.Init.BufferTransferLength = 16;
     hmdma_octospi1_fifo_th.Init.SourceBurst = MDMA_SOURCE_BURST_SINGLE;
     hmdma_octospi1_fifo_th.Init.DestBurst = MDMA_DEST_BURST_SINGLE;
