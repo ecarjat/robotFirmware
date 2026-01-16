@@ -25,9 +25,10 @@
 #endif
 
 /* EKF innovation gating thresholds */
-#define EKF_INNOV_THETA_MAX_RAD 0.5f
-#define EKF_INNOV_VEL_MAX_MPS   1.5f
-#define EKF_INNOV_POS_MAX_M     0.5f
+#define EKF_INNOV_THETA_MAX_RAD    0.5f
+#define EKF_INNOV_VEL_MAX_MPS      1.5f
+#define EKF_INNOV_POS_MAX_M        0.5f
+#define EKF_INNOV_YAW_RATE_MAX_RPS 1.0f  /* Yaw rate innovation gate (rad/s) */
 
 /* EKF init parameters */
 #define EKF_INIT_ACCEL_SAMPLES   50
@@ -40,16 +41,21 @@
 #define EKF_Q_X          1e-2f
 #define EKF_Q_X_DOT      5e-2f
 #define EKF_Q_BIAS       1e-5f
+#define EKF_Q_YAW        1e-3f   /* Yaw angle process noise */
+#define EKF_Q_YAW_BIAS   1e-6f   /* Yaw gyro bias random walk */
 
-#define EKF_R_THETA_ACC  4e-3f
-#define EKF_R_V_ENC      5e-2f
-#define EKF_R_X_POS      1e-3f
+#define EKF_R_THETA_ACC     4e-3f
+#define EKF_R_V_ENC         5e-2f
+#define EKF_R_X_POS         1e-3f
+#define EKF_R_YAW_RATE_ENC  1e-2f  /* Encoder differential yaw rate noise */
 
 #define EKF_P0_THETA     0.05f
 #define EKF_P0_THETA_DOT 0.05f
 #define EKF_P0_X         0.2f
 #define EKF_P0_X_DOT     0.2f
 #define EKF_P0_BIAS      0.01f
+#define EKF_P0_YAW       0.1f    /* Initial yaw uncertainty (rad^2) */
+#define EKF_P0_YAW_BIAS  0.01f   /* Initial yaw bias uncertainty */
 
 #define EKF_TUNE_GYRO_STILL_THRESH_RAD_S 0.0174533f
 #define EKF_TUNE_ANORM_STILL_THRESH_G    0.12f

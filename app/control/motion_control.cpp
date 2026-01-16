@@ -398,10 +398,11 @@ void motion_control_tick(uint32_t now_ms)
         s_last_imu_ok_ms = now_ms;
     }
 
-    s_estimator.update(primary, secondary, now_ms, v_enc);
+    s_estimator.update(primary, secondary, now_ms, v_enc, yaw_rate_enc);
 
-    float gyro_z = s_estimator.getLastGyroZ();
-    s_controller.setYawRates(gyro_z, yaw_rate_enc);
+    // Use EKF-filtered yaw rate (gyroZ - yawBias) for control
+    float gyro_z_filtered = s_estimator.getEstimatedYawRate();
+    s_controller.setYawRates(gyro_z_filtered, yaw_rate_enc);
 
     StateEstimate estimate = s_estimator.getEstimate();
 

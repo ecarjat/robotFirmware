@@ -2,8 +2,8 @@
 #define CONTROL_BALANCER_EKF_H
 
 // TinyEKF uses compile-time dimensions via macros.
-#define EKF_N 5  // [theta, theta_dot, x, x_dot, b_g]
-#define EKF_M 3  // [theta_acc, v_enc, x_pos]
+#define EKF_N 7  // [theta, theta_dot, x, x_dot, gyro_bias, yaw, yaw_bias]
+#define EKF_M 4  // [theta_acc, v_enc, x_pos, yaw_rate_enc]
 
 #include <stdint.h>
 #include <math.h>
@@ -14,7 +14,9 @@ struct BalancerState {
     float thetaDot;   // rad/s
     float x;          // m
     float xDot;       // m/s
-    float gyroBias;   // rad/s
+    float gyroBias;   // rad/s (pitch gyro bias)
+    float yaw;        // rad (heading angle)
+    float yawBias;    // rad/s (yaw gyro bias)
 };
 
 struct BalancerEkfDiag {
@@ -40,8 +42,9 @@ public:
 
     // Run one EKF step using latest measurements; returns true on update success.
     // thetaMeasVar: optional override for theta measurement variance (use NAN for default)
-    bool step(float thetaAcc, float vEnc, float posEnc, float gyroPitch, float dt,
-              float thetaMeasVar = NAN);
+    bool step(float thetaAcc, float vEnc, float posEnc,
+              float gyroPitch, float gyroYaw, float yawRateEnc,
+              float dt, float thetaMeasVar = NAN);
 
     BalancerState getState() const;
     bool getDiag(BalancerEkfDiag& out) const;

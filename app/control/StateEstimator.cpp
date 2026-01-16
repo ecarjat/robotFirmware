@@ -31,7 +31,7 @@ float vec_dot(const float a[3], const float b[3]) {
 
 StateEstimator::StateEstimator()
     : ekf_(),
-      estimate_{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false},
+      estimate_{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false},
       lastUpdateMs_(0U),
       bootInitDone_(false),
       lastThetaAcc_(0.0f),
@@ -130,7 +130,8 @@ void StateEstimator::setImuRotations(const float *primary, const float *secondar
     }
 }
 
-void StateEstimator::update(const ImuReading &primary, const ImuReading &secondary, uint32_t now_ms, float v_enc)
+void StateEstimator::update(const ImuReading &primary, const ImuReading &secondary,
+                            uint32_t now_ms, float v_enc, float yaw_rate_enc)
 {
     if (!initialized_)
     {
@@ -350,6 +351,7 @@ void StateEstimator::update(const ImuReading &primary, const ImuReading &seconda
         theta_acc = atan2f(-accel_body[0], accel_yz);
     }
     float gyro_pitch = gyro_body[1];
+    float gyro_yaw = gyro_body[2];
 
     float theta_var = ekf_.getThetaMeasurementVarianceBase();
     if (gate_accel)
@@ -357,9 +359,12 @@ void StateEstimator::update(const ImuReading &primary, const ImuReading &seconda
         theta_var *= EKF_TUNE_R_MULT;
     }
 
-    float v_enc_ekf = NAN;
-    float pos_enc = NAN;
-    bool ekf_ok = ekf_.step(theta_acc, v_enc_ekf, pos_enc, gyro_pitch, dt_s, theta_var);
+    // Enable encoder velocity and yaw rate measurements
+    float v_enc_ekf = v_enc;
+    float pos_enc = NAN;  // Position measurement still disabled
+    bool ekf_ok = ekf_.step(theta_acc, v_enc_ekf, pos_enc,
+                            gyro_pitch, gyro_yaw, yaw_rate_enc,
+                            dt_s, theta_var);
     BalancerState st = ekf_.getState();
 
     estimate_.theta = st.theta;
@@ -367,6 +372,8 @@ void StateEstimator::update(const ImuReading &primary, const ImuReading &seconda
     estimate_.x = st.x;
     estimate_.xDot = st.xDot;
     estimate_.gyroBias = st.gyroBias;
+    estimate_.yaw = st.yaw;
+    estimate_.yawBias = st.yawBias;
     estimate_.valid = ekf_ok;
 
     lastThetaAcc_ = theta_acc;
@@ -410,4 +417,10 @@ bool StateEstimator::getLastWheelMechanicalAngles(float &angle_left, float &angl
     (void)angle_left;
     (void)angle_right;
     return false;
+}
+
+float StateEstimator::getEstimatedYawRate() const
+{
+    // Return gyro yaw rate minus estimated bias
+    return ekf_log_data_.gyro_z - estimate_.yawBias;
 }

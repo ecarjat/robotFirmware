@@ -7,6 +7,8 @@ struct StateEstimate {
     float x;
     float xDot;
     float gyroBias;
+    float yaw;       // Heading angle (rad)
+    float yawBias;   // Yaw gyro bias (rad/s)
     bool valid;
 };
 

@@ -51,8 +51,10 @@ public:
     StateEstimator();
 
     bool begin(const RobotParams &params);
-    void update(const ImuReading &primary, const ImuReading &secondary, uint32_t now_ms, float v_enc);
+    void update(const ImuReading &primary, const ImuReading &secondary,
+                uint32_t now_ms, float v_enc, float yaw_rate_enc);
     void setControlDt(float dtSeconds);
+    float getEstimatedYawRate() const;
     void setImuRotations(const float *primary, const float *secondary);
 
     StateEstimate getEstimate() const;
