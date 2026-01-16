@@ -379,6 +379,13 @@ DRESULT SD_write(BYTE lun, const BYTE *buff, DWORD sector, UINT count)
     else
     {
       /* Slow path, fetch each sector a part and memcpy to destination buffer */
+#if (ENABLE_SD_DMA_CACHE_MAINTENANCE == 1)
+      /*
+      * invalidate the scratch buffer before the next write to get the actual data instead of the cached one
+      */
+      SCB_InvalidateDCache_by_Addr((uint32_t*)scratch, BLOCKSIZE);
+#endif
+
       for (i = 0; i < count; i++)
       {
         WriteStatus = 0;
@@ -386,7 +393,7 @@ DRESULT SD_write(BYTE lun, const BYTE *buff, DWORD sector, UINT count)
         memcpy((void *)scratch, (void *)buff, BLOCKSIZE);
         buff += BLOCKSIZE;
 #if (ENABLE_SD_DMA_CACHE_MAINTENANCE == 1)
-        /* Ensure scratch contents are in RAM before DMA reads. */
+        /* Ensure DMA sees the freshly copied scratch data. */
         SCB_CleanDCache_by_Addr((uint32_t*)scratch, BLOCKSIZE);
 #endif
 

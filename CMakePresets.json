@@ -15,7 +15,7 @@
             "inherits": "default",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
-                "APP_LOG_LEVEL": "3"
+                "APP_LOG_LEVEL": "4"
             }
         },
         {
