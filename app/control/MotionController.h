@@ -6,6 +6,30 @@
 #include "config_control.h"
 #include "param_storage.h"
 
+/**
+ * @brief Inner longitudinal loop mode selector
+ */
+enum class InnerLongMode {
+    PID = 0,  /**< Cascaded PID inner loop (baseline) */
+    LQR = 1,  /**< LQR inner loop */
+};
+
+/**
+ * @brief Inner controller diagnostics for LQR mode
+ */
+struct InnerCtrlDiag {
+    float u_sum_cmd;      /**< Final blended u_sum output (A) */
+    float u_sum_pid;      /**< PID-computed u_sum before blend (A) */
+    float u_sum_lqr;      /**< LQR-computed u_sum before blend (A) */
+    float u_diff_cmd;     /**< Yaw loop differential output (A) */
+    float alpha;          /**< Current blend factor (0=PID, 1=LQR) */
+    bool sat_left;        /**< Left wheel saturated flag */
+    bool sat_right;       /**< Right wheel saturated flag */
+    bool fallback_to_pid; /**< Forced fallback to PID due to safety */
+    InnerLongMode requested_mode;
+    InnerLongMode active_mode;
+};
+
 class MotionController {
 public:
     struct ControlOutput {
@@ -21,11 +45,17 @@ public:
 
     void setRobotParams(const RobotParams& params);
     void setBalanceGains(const balance_gains_t& gains);
+    void setLqrParams(const lqr_params_t& lqr);
     void setControlDt(float dtSeconds);
 
     void setTeleopCommands(float forwardCmd, float turnCmd);
     void setTargetVelocity(float linearVelocityMps);
     void setYawRates(float gyroZ, float yawRateEnc);
+
+    /* LQR mode control */
+    void setRequestedMode(InnerLongMode mode);
+    InnerLongMode getRequestedMode() const { return _requestedMode; }
+    InnerLongMode getActiveMode() const { return _activeMode; }
 
     float getTeleopForward() const { return _teleopForward; }
     float getTeleopTurn() const { return _teleopTurn; }
@@ -40,6 +70,7 @@ public:
     float getLastPitchD() const { return _lastPitchD; }
 
     bool isOutputSaturated() const { return _lastSaturated; }
+    bool getInnerCtrlDiag(InnerCtrlDiag& diag) const;
 
     Command computeControl(const StateEstimate& state, float dtSeconds);
 
@@ -113,6 +144,19 @@ private:
     float _lastPitchI = 0.0f;
     float _lastPitchD = 0.0f;
     bool _lastSaturated = false;
+
+    /* LQR inner loop state */
+    lqr_params_t _lqr;
+    InnerLongMode _requestedMode = InnerLongMode::PID;
+    InnerLongMode _activeMode = InnerLongMode::PID;
+    float _alpha = 0.0f;  /* Blend factor: 0=PID, 1=LQR */
+    float _prevUSum = 0.0f;
+    bool _prevUSumValid = false;
+    InnerCtrlDiag _diag = {};
+    bool _diagValid = false;
+
+    float computeLqrUSum(const StateEstimate& state, float vRef, float thetaRef);
+    void updateBlendAlpha(float dt);
 
     static constexpr float DERIVATIVE_FILTER_ALPHA = 0.1f;
 };

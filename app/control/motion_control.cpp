@@ -78,6 +78,7 @@ static void motion_control_update_params(void)
     s_params.maxForwardVelocity = g_robot_params.max_linear_vel_mps;
     s_controller.setRobotParams(s_params);
     s_controller.setBalanceGains(g_robot_params.balance);
+    s_controller.setLqrParams(g_robot_params.lqr);
     s_max_turn_rate = g_robot_params.max_angular_vel_rps;
     if (g_robot_params.control_rate_hz > 1e-3f) {
         s_control_dt = 1.0f / g_robot_params.control_rate_hz;
@@ -193,6 +194,13 @@ void motion_control_init(void)
     s_estimator.setImuRotations(g_robot_params.imu_bmi270.rotation,
                                 g_robot_params.imu_icm42688.rotation);
     motion_modes_init();
+
+    /* Initialize LQR params and set default mode */
+    s_controller.setLqrParams(g_robot_params.lqr);
+    if (g_robot_params.lqr.default_mode != 0) {
+        s_controller.setRequestedMode(InnerLongMode::LQR);
+    }
+
     s_last_tick_ms = 0U;
     s_last_imu_ok_ms = 0U;
     s_last_motor_ok_ms = 0U;
@@ -209,12 +217,12 @@ void motion_control_init(void)
 void motion_control_set_mode(motion_mode_t mode)
 {
     motion_modes_set(mode);
-    // Reset PID state on any mode that shouldn't carry over integral terms.
+    // Reset PID/LQR state on any mode that shouldn't carry over integral terms.
     // This includes entering BALANCING to prevent windup from previous sessions.
     if (mode == MOTION_MODE_DISARMED || mode == MOTION_MODE_FAULT ||
         mode == MOTION_MODE_FALLEN || mode == MOTION_MODE_BALANCING)
     {
-        s_controller.resetPidState();
+        s_controller.resetPidState();  /* Also resets LQR state */
     }
 }
 
@@ -555,10 +563,25 @@ void motion_control_tick(uint32_t now_ms)
         rec.P = s_controller.getLastPitchP();
         rec.I = s_controller.getLastPitchI();
         rec.D = s_controller.getLastPitchD();
-        rec.u_common = 0.0f;  /* Not tracked separately */
-        rec.u_turn = 0.0f;    /* Not tracked separately */
         rec.uL_cmd = s_last_iq_left;
         rec.uR_cmd = s_last_iq_right;
+
+        /* LQR diagnostics */
+        InnerCtrlDiag lqr_diag{};
+        if (s_controller.getInnerCtrlDiag(lqr_diag)) {
+            rec.u_common = lqr_diag.u_sum_cmd;
+            rec.u_turn = lqr_diag.u_diff_cmd;
+            rec.u_sum_lqr = lqr_diag.u_sum_lqr;
+            rec.lqr_alpha = static_cast<uint8_t>(lqr_diag.alpha * 255.0f);
+            if (lqr_diag.active_mode == InnerLongMode::LQR) {
+                rec.flags |= LOGF_REC_LQR_ACTIVE;
+            }
+        } else {
+            rec.u_common = 0.0f;
+            rec.u_turn = 0.0f;
+            rec.u_sum_lqr = 0.0f;
+            rec.lqr_alpha = 0;
+        }
     }
 
     /* Compute CRC */
@@ -660,4 +683,15 @@ bool motion_control_get_control_output(motion_control_output_t *out)
 bool motion_control_is_saturated(void)
 {
     return s_controller.isOutputSaturated();
+}
+
+void motion_control_set_inner_mode(uint8_t mode)
+{
+    InnerLongMode m = (mode != 0U) ? InnerLongMode::LQR : InnerLongMode::PID;
+    s_controller.setRequestedMode(m);
+}
+
+uint8_t motion_control_get_inner_mode(void)
+{
+    return (s_controller.getActiveMode() == InnerLongMode::LQR) ? 1U : 0U;
 }

@@ -87,6 +87,18 @@ bool motion_control_get_control_output(motion_control_output_t *out);
  */
 bool motion_control_is_saturated(void);
 
+/**
+ * @brief Set inner loop mode (PID or LQR)
+ * @param mode 0=PID, 1=LQR
+ */
+void motion_control_set_inner_mode(uint8_t mode);
+
+/**
+ * @brief Get current inner loop mode
+ * @return 0=PID, 1=LQR
+ */
+uint8_t motion_control_get_inner_mode(void);
+
 #ifdef __cplusplus
 }
 #endif

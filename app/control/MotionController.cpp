@@ -1,6 +1,8 @@
 #include "MotionController.h"
+#include "app_config.h"
 
 #include <math.h>
+#include <string.h>
 
 /* Threshold for detecting near-zero gain values to avoid division by zero.
  * Gains smaller than this are treated as disabled (effectively zero). */
@@ -9,6 +11,17 @@ static constexpr float kGainEpsilon = 1e-6f;
 /* Default integral limit when Ki is disabled or iMax not configured.
  * Uses a large but finite value to prevent unbounded windup. */
 static constexpr float kDefaultIntegralLimit = 1000.0f;
+
+namespace {
+
+inline float clampf(float val, float limit)
+{
+    if (val > limit) return limit;
+    if (val < -limit) return -limit;
+    return val;
+}
+
+}  /* anonymous namespace */
 
 MotionController::MotionController(const RobotParams& robotParams)
     : _robot(robotParams),
@@ -36,8 +49,28 @@ MotionController::MotionController(const RobotParams& robotParams)
       _yawDampGain(YAW_DAMP_GAIN),
       _yawBlendAlpha(YAW_BLEND_ALPHA),
       _controlDt(CONTROL_DT),
-      _velocitySlewRate(VELOCITY_SLEW_RATE_RAD_PER_S2)
+      _velocitySlewRate(VELOCITY_SLEW_RATE_RAD_PER_S2),
+      _lqr{},
+      _requestedMode(InnerLongMode::PID),
+      _activeMode(InnerLongMode::PID),
+      _alpha(0.0f),
+      _prevUSum(0.0f),
+      _prevUSumValid(false),
+      _diag{},
+      _diagValid(false)
 {
+    /* Initialize LQR with defaults */
+    _lqr.K[0] = LQR_K0_X;
+    _lqr.K[1] = LQR_K1_V;
+    _lqr.K[2] = LQR_K2_THETA;
+    _lqr.K[3] = LQR_K3_THETADOT;
+    _lqr.u_limit = LQR_U_LIMIT;
+    _lqr.du_limit = LQR_DU_LIMIT;
+    _lqr.theta_ref_limit = LQR_THETA_REF_LIMIT;
+    _lqr.v_ref_limit = LQR_V_REF_LIMIT;
+    _lqr.engage_ramp_ms = LQR_ENGAGE_RAMP_MS;
+    _lqr.disengage_ramp_ms = LQR_DISENGAGE_RAMP_MS;
+    _lqr.default_mode = 0;
 }
 
 void MotionController::setRobotParams(const RobotParams& params)
@@ -68,6 +101,90 @@ void MotionController::setBalanceGains(const balance_gains_t& gains)
 
     _iqMax = gains.IqMax;
     _velPid_iMax = gains.iV_max;
+}
+
+void MotionController::setLqrParams(const lqr_params_t& lqr)
+{
+    _lqr = lqr;
+    APP_LOG_INFO("LQR params: K=[%.2f,%.2f,%.2f,%.2f] u_lim=%.1f",
+                 (double)lqr.K[0], (double)lqr.K[1],
+                 (double)lqr.K[2], (double)lqr.K[3],
+                 (double)lqr.u_limit);
+}
+
+void MotionController::setRequestedMode(InnerLongMode mode)
+{
+    if (mode != _requestedMode) {
+        InnerLongMode old_mode = _requestedMode;
+        _requestedMode = mode;
+        APP_LOG_INFO("Inner mode: %s -> %s (ramp=%u ms)",
+                     old_mode == InnerLongMode::LQR ? "LQR" : "PID",
+                     mode == InnerLongMode::LQR ? "LQR" : "PID",
+                     mode == InnerLongMode::LQR ? _lqr.engage_ramp_ms
+                                                : _lqr.disengage_ramp_ms);
+    }
+}
+
+void MotionController::updateBlendAlpha(float dt)
+{
+    float target_alpha = (_requestedMode == InnerLongMode::LQR) ? 1.0f : 0.0f;
+
+    if (_alpha < target_alpha) {
+        /* Ramping toward LQR */
+        float ramp_time = _lqr.engage_ramp_ms * 0.001f;
+        if (ramp_time > 0.0f) {
+            float step = dt / ramp_time;
+            _alpha += step;
+            if (_alpha > target_alpha) _alpha = target_alpha;
+        } else {
+            _alpha = target_alpha;
+        }
+    } else if (_alpha > target_alpha) {
+        /* Ramping toward PID */
+        float ramp_time = _lqr.disengage_ramp_ms * 0.001f;
+        if (ramp_time > 0.0f) {
+            float step = dt / ramp_time;
+            _alpha -= step;
+            if (_alpha < target_alpha) _alpha = target_alpha;
+        } else {
+            _alpha = target_alpha;
+        }
+    }
+
+    /* Update active mode based on blend position */
+    if (_alpha >= 1.0f) {
+        _activeMode = InnerLongMode::LQR;
+    } else if (_alpha <= 0.0f) {
+        _activeMode = InnerLongMode::PID;
+    }
+}
+
+float MotionController::computeLqrUSum(const StateEstimate& state, float vRef, float thetaRef)
+{
+    /* 4-state LQR: state_err = [x_err, v_err, theta_err, thetaDot]
+     * Control law: u_sum = -K * state_err (negative feedback)
+     *
+     * Note: x_err is set to 0 (no position control) by using K[0]=0 */
+    float x_err = 0.0f;  /* Position error disabled - use K[0]=0 */
+    float v_err = state.xDot - vRef;
+    float theta_err = state.theta - thetaRef;
+    float thetaDot = state.thetaDot;
+
+    float u_sum = -(_lqr.K[0] * x_err
+                  + _lqr.K[1] * v_err
+                  + _lqr.K[2] * theta_err
+                  + _lqr.K[3] * thetaDot);
+
+    return u_sum;
+}
+
+bool MotionController::getInnerCtrlDiag(InnerCtrlDiag& diag) const
+{
+    if (!_diagValid) {
+        return false;
+    }
+    diag = _diag;
+    return true;
 }
 
 void MotionController::setControlDt(float dtSeconds)
@@ -112,6 +229,14 @@ void MotionController::resetPidState()
     _lastGyroZ = 0.0f;
     _lastYawRateEnc = 0.0f;
     _lastYawRate = 0.0f;
+
+    /* Reset LQR state */
+    _alpha = (_requestedMode == InnerLongMode::LQR) ? 1.0f : 0.0f;
+    _activeMode = _requestedMode;
+    _prevUSum = 0.0f;
+    _prevUSumValid = false;
+    _diag = InnerCtrlDiag{};
+    _diagValid = false;
 }
 
 void MotionController::setYawRates(float gyroZ, float yawRateEnc)
@@ -189,6 +314,8 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     Command cmd{};
     cmd.iq = {0.0f, 0.0f};
 
+    /* ========== PID u_sum computation (always computed for blending) ========== */
+
     /* Compute velocity PID integral limit:
      * - If Ki and iMax are configured, limit = iMax/Ki (in velocity units)
      * - Cap at kDefaultIntegralLimit to prevent huge limits with tiny Ki
@@ -258,22 +385,68 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     _lastPitchI = i;
     _lastPitchD = d;
 
-    float uCommon = uBal - _velDampGain * state.xDot;
+    float uSumPid = uBal - _velDampGain * state.xDot;
+
+    /* ========== LQR u_sum computation ========== */
+
+    /* LQR uses theta_ref=0 (upright) and v_ref=_targetVel */
+    float uSumLqr = computeLqrUSum(state, _targetVel, 0.0f);
+
+    /* ========== Blend PID and LQR based on alpha ========== */
+
+    updateBlendAlpha(dtSeconds);
+
+    float uSum = (1.0f - _alpha) * uSumPid + _alpha * uSumLqr;
+
+    /* Rate limiting on u_sum */
+    if (_prevUSumValid && _lqr.du_limit > 0.0f) {
+        float maxDelta = _lqr.du_limit * dtSeconds;
+        float delta = uSum - _prevUSum;
+        delta = clampf(delta, maxDelta);
+        uSum = _prevUSum + delta;
+    }
+    _prevUSum = uSum;
+    _prevUSumValid = true;
+
+    /* ========== Yaw differential (unchanged) ========== */
+
     float uTurn = _turnGain * _teleopTurn - _yawDampGain * _lastYawRate;
 
+    /* ========== Mix u_sum and u_diff into wheel commands ========== */
+
     ControlOutput out;
-    out.iqLeft = uCommon - uTurn;
-    out.iqRight = uCommon + uTurn;
+    out.iqLeft = uSum - uTurn;
+    out.iqRight = uSum + uTurn;
+
+    /* Use LQR limit when in LQR mode, else use maxIq */
+    float effectiveLimit = (_alpha > 0.5f) ? _lqr.u_limit : maxIq;
+    if (effectiveLimit <= 0.0f) {
+        effectiveLimit = _maxWheelVelocity;
+    }
 
     _lastSaturated = false;
-    if (maxIq > 0.0f) {
-        if (out.iqLeft > maxIq) { out.iqLeft = maxIq; _lastSaturated = true; }
-        if (out.iqLeft < -maxIq) { out.iqLeft = -maxIq; _lastSaturated = true; }
-        if (out.iqRight > maxIq) { out.iqRight = maxIq; _lastSaturated = true; }
-        if (out.iqRight < -maxIq) { out.iqRight = -maxIq; _lastSaturated = true; }
+    _diag.sat_left = false;
+    _diag.sat_right = false;
+    if (effectiveLimit > 0.0f) {
+        if (out.iqLeft > effectiveLimit) { out.iqLeft = effectiveLimit; _lastSaturated = true; _diag.sat_left = true; }
+        if (out.iqLeft < -effectiveLimit) { out.iqLeft = -effectiveLimit; _lastSaturated = true; _diag.sat_left = true; }
+        if (out.iqRight > effectiveLimit) { out.iqRight = effectiveLimit; _lastSaturated = true; _diag.sat_right = true; }
+        if (out.iqRight < -effectiveLimit) { out.iqRight = -effectiveLimit; _lastSaturated = true; _diag.sat_right = true; }
     }
 
     _lastPitchTarget = pitchTarget;
+
+    /* ========== Record diagnostics ========== */
+
+    _diag.u_sum_pid = uSumPid;
+    _diag.u_sum_lqr = uSumLqr;
+    _diag.u_sum_cmd = uSum;
+    _diag.u_diff_cmd = uTurn;
+    _diag.alpha = _alpha;
+    _diag.fallback_to_pid = false;
+    _diag.requested_mode = _requestedMode;
+    _diag.active_mode = _activeMode;
+    _diagValid = true;
 
     cmd.iq = out;
     return cmd;

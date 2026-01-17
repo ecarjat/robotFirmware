@@ -48,6 +48,7 @@ extern "C" {
 #define LOGF_REC_UR_SAT        (1u << 3)  /* Right motor saturated */
 #define LOGF_REC_FALLEN        (1u << 4)  /* Robot in FALLEN state */
 #define LOGF_REC_ARMED         (1u << 5)  /* Robot is armed */
+#define LOGF_REC_LQR_ACTIVE    (1u << 6)  /* LQR inner loop active (vs PID) */
 
 /**
  * @brief Log metadata structure (stored in flash at LOG_META)
@@ -117,14 +118,17 @@ typedef struct __attribute__((packed)) {
   float    P;                  /* Proportional term */
   float    I;                  /* Integral term */
   float    D;                  /* Derivative term */
-  float    u_common;           /* Common drive command */
+  float    u_common;           /* Common drive command (u_sum_cmd) */
   float    u_turn;             /* Turn differential command */
   float    uL_cmd;             /* Left motor command (Iq proxy) */
   float    uR_cmd;             /* Right motor command (Iq proxy) */
+  float    u_sum_lqr;          /* LQR u_sum before blending */
+  uint8_t  lqr_alpha;          /* LQR blend factor (0-255 = 0.0-1.0) */
+  uint8_t  pad[3];             /* Padding to maintain alignment */
 
   /* Trailer */
   uint32_t crc32;              /* CRC32 of entire record excluding this field */
-} LogRecord;  /* 152 bytes, padded to 160 */
+} LogRecord;  /* 160 bytes with LQR fields */
 
 /* Compile-time size validation */
 _Static_assert(sizeof(LogRecord) <= LOG_RECORD_SIZE,

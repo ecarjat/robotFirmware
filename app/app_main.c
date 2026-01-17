@@ -107,7 +107,9 @@ static void app_init(void) {
 
   /* Load robot parameters from flash (or use defaults) */
   param_storage_init();
+  WDOG_CHECKPOINT(WDOG_CP_PARAM_INIT);
   int param_rc = param_storage_load(&g_robot_params);
+  WDOG_CHECKPOINT(WDOG_CP_PARAM_LOAD);
   if (param_rc != PARAM_OK && param_rc != PARAM_ERR_NOT_FOUND) {
     APP_LOG_ERROR("Param load error: %d", param_rc);
   }

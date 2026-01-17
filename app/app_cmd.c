@@ -27,8 +27,12 @@ void app_cmd_handler(uint8_t msg_type, const uint8_t *payload, size_t len,
     bool arm_rise = (rising & ROBOT_TELEOP_FLAG_ARM) != 0U;
     bool mode_cycle_rise = (rising & ROBOT_TELEOP_FLAG_MODE_CYCLE) != 0U;
     bool dump_rise = (rising & ROBOT_TELEOP_FLAG_DUMP) != 0U;
+    bool lqr_mode = (flags & ROBOT_TELEOP_FLAG_LQR_MODE) != 0U;
 
     s_last_teleop_flags = flags;
+
+    /* Set inner loop mode directly from flag (0=PID, 1=LQR) */
+    motion_control_set_inner_mode(lqr_mode ? 1U : 0U);
 
     if (dump_rise) {
       uint32_t dump_seconds = g_robot_params.dump_seconds_default;

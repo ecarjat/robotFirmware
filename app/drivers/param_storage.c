@@ -40,6 +40,10 @@ static struct {
     bool     cache_valid;
 } s_param;
 
+static robot_params_t s_param_scan_params;
+static uint8_t s_param_crc_buf[PARAM_HEADER_SIZE + sizeof(robot_params_t)]
+    __attribute__((aligned(4)));
+
 /**
  * @brief Calculate record size (header + data + CRC, 32-byte aligned)
  */
@@ -212,11 +216,15 @@ static int param_program(uint32_t address, const uint8_t *data, uint32_t length)
 static uint32_t param_compute_crc(const param_header_t *header,
                                    const uint8_t *data, uint32_t data_len)
 {
-    /* CRC over header + data */
-    uint8_t buf[PARAM_HEADER_SIZE + sizeof(robot_params_t)];
-    memcpy(buf, header, PARAM_HEADER_SIZE);
-    memcpy(buf + PARAM_HEADER_SIZE, data, data_len);
-    return robot_crc32(buf, PARAM_HEADER_SIZE + data_len);
+    if (data_len > sizeof(robot_params_t))
+    {
+        return 0U;
+    }
+
+    /* CRC over header + data (use static buffer to reduce stack usage). */
+    memcpy(s_param_crc_buf, header, PARAM_HEADER_SIZE);
+    memcpy(s_param_crc_buf + PARAM_HEADER_SIZE, data, data_len);
+    return robot_crc32(s_param_crc_buf, PARAM_HEADER_SIZE + data_len);
 }
 
 /**
@@ -301,13 +309,13 @@ static void param_scan_sector(void)
         }
 
         param_header_t header;
-        robot_params_t params;
-        if (param_validate_record(addr, &header, &params))
+        if (param_validate_record(addr, &header, &s_param_scan_params))
         {
             if (header.sequence >= s_param.current_sequence)
             {
                 s_param.current_sequence = header.sequence;
-                memcpy(&s_param.cached_params, &params, sizeof(robot_params_t));
+                memcpy(&s_param.cached_params, &s_param_scan_params,
+                       sizeof(robot_params_t));
                 s_param.cache_valid = true;
             }
             s_param.record_count++;
@@ -492,6 +500,22 @@ static void param_init_balance_gains(balance_gains_t *gains)
     gains->iV_max = BALANCE_DEFAULT_IV_MAX;
 }
 
+static void param_init_lqr_params(lqr_params_t *lqr)
+{
+    lqr->K[0] = LQR_K0_X;
+    lqr->K[1] = LQR_K1_V;
+    lqr->K[2] = LQR_K2_THETA;
+    lqr->K[3] = LQR_K3_THETADOT;
+    lqr->u_limit = LQR_U_LIMIT;
+    lqr->du_limit = LQR_DU_LIMIT;
+    lqr->theta_ref_limit = LQR_THETA_REF_LIMIT;
+    lqr->v_ref_limit = LQR_V_REF_LIMIT;
+    lqr->engage_ramp_ms = LQR_ENGAGE_RAMP_MS;
+    lqr->disengage_ramp_ms = LQR_DISENGAGE_RAMP_MS;
+    lqr->default_mode = 0;  /* PID by default */
+    memset(lqr->reserved, 0, sizeof(lqr->reserved));
+}
+
 void param_storage_get_defaults(robot_params_t *params)
 {
     if (params == NULL)
@@ -518,6 +542,9 @@ void param_storage_get_defaults(robot_params_t *params)
 
     /* Balance controller gains */
     param_init_balance_gains(&params->balance);
+
+    /* LQR inner loop parameters */
+    param_init_lqr_params(&params->lqr);
 
     /* Motion limits */
     params->max_linear_vel_mps = 0.5f;

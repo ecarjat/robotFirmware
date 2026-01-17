@@ -40,7 +40,7 @@ extern "C" {
  */
 
 #define PARAM_MAGIC             0x524F424FUL  /* 'ROBO' */
-#define PARAM_VERSION           7U
+#define PARAM_VERSION           8U
 #define PARAM_FLASH_BASE        0x080C0000UL
 #define PARAM_FLASH_SIZE        0x00020000UL  /* 128 KB */
 #define PARAM_FLASH_END         (PARAM_FLASH_BASE + PARAM_FLASH_SIZE)
@@ -94,6 +94,24 @@ typedef struct balance_gains {
 } balance_gains_t;
 
 /**
+ * @brief LQR inner loop parameters
+ *
+ * 4-state LQR: state = [x_err, v_err, theta_err, thetaDot]
+ * Control law: u_sum = -K * state
+ */
+typedef struct lqr_params {
+    float K[4];             /* LQR gains: [K_x, K_v, K_theta, K_thetaDot] */
+    float u_limit;          /* Max |u_sum| (A) */
+    float du_limit;         /* Max rate of change |du_sum| per second (A/s) */
+    float theta_ref_limit;  /* Max |theta_ref| (rad) */
+    float v_ref_limit;      /* Max |v_ref| (m/s) */
+    uint16_t engage_ramp_ms;    /* PID→LQR blend time (ms) */
+    uint16_t disengage_ramp_ms; /* LQR→PID blend time (ms) */
+    uint8_t default_mode;   /* 0=PID, 1=LQR at startup */
+    uint8_t reserved[3];    /* Padding for alignment */
+} lqr_params_t;
+
+/**
  * @brief Robot parameters structure
  *
  * This structure contains all persistent robot configuration.
@@ -117,6 +135,9 @@ typedef struct {
 
     /* Balance controller gains */
     balance_gains_t balance;
+
+    /* LQR inner loop parameters */
+    lqr_params_t lqr;
 
     /* Motion limits */
     float max_linear_vel_mps;

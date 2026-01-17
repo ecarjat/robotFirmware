@@ -142,6 +142,28 @@
 #define VELOCITY_SLEW_RATE_RAD_PER_S2 20.0f
 #define PARAM_MAX_TURN_RATE 2.0f
 
+/* ======== LQR Inner Loop Configuration ======== */
+
+/* Default LQR gains (4-state: [x_err, v_err, theta_err, thetaDot])
+ * These are placeholder gains - tune on real hardware */
+#define LQR_K0_X         0.0f      /* Position error gain (set to 0 to disable) */
+#define LQR_K1_V         0.3f      /* Velocity error gain */
+#define LQR_K2_THETA     2.5f      /* Pitch angle gain */
+#define LQR_K3_THETADOT  0.8f      /* Pitch rate gain */
+
+/* LQR limits */
+#define LQR_U_LIMIT            3.0f     /* Max |u_sum| (A) */
+#define LQR_DU_LIMIT           50.0f    /* Max |du_sum| per tick (A/s) */
+#define LQR_THETA_REF_LIMIT    0.15f    /* Max |theta_ref| (rad) */
+#define LQR_V_REF_LIMIT        0.6f     /* Max |v_ref| (m/s) */
+
+/* Mode switching ramp times */
+#define LQR_ENGAGE_RAMP_MS     200U     /* PID→LQR blend time (ms) */
+#define LQR_DISENGAGE_RAMP_MS  100U     /* LQR→PID blend time (ms) */
+
+/* Estimator staleness threshold for LQR fallback */
+#define EST_MAX_AGE_MS         10U      /* Max estimator age before fallback (ms) */
+
 /* IMU staleness tolerances (consecutive stale samples allowed). */
 #define IMU_STALE_ALLOWED_NORMAL        50
 #define IMU_STALE_ALLOWED_WHILE_ENABLING 1000
