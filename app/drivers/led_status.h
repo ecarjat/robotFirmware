@@ -30,6 +30,7 @@ typedef enum {
     LED_STATUS_FAULT = (1 << 2),             /**< System fault */
     LED_STATUS_FALLEN = (1 << 3),            /**< Robot has fallen */
     LED_STATUS_TELEM_FAILURE = (1 << 4),     /**< Telemetry send failure (alternating R/G) */
+    LED_STATUS_LOGGING_FAILURE = (1 << 5),   /**< Logging/QSPI failure */
 } led_status_flags_t;
 
 /**

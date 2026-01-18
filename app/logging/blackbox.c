@@ -2,6 +2,7 @@
 
 #include "app_config.h"
 #include "crc32.h"
+#include "led_status.h"
 #include "main.h"
 #include "blackbox_dump.h"
 #include "qspi_w25q64.h"
@@ -71,6 +72,7 @@ static LogMeta s_meta_pending
 
 /* Statistics */
 static uint32_t s_qspi_write_errors = 0;
+static bool s_qspi_error_signaled = false;
 
 /* Active log fields mask */
 static uint32_t s_log_fields_mask = LOG_FIELDS_MASK_DEFAULT;
@@ -106,6 +108,7 @@ static void log_advance_write_addr_after_chunk(void);
 static uint16_t log_rate_from_params(const robot_params_t *params);
 static void log_meta_tick(qspi_w25q64_async_state_t async_state);
 static bool log_erase_ahead_ready(void);
+static void log_note_qspi_error(void);
 
 void log_init(const robot_params_t *params) {
   if (s_initialized) {
@@ -210,7 +213,7 @@ void log_writer_tick(void) {
 
   if (s_write_state != LOG_WRITE_IDLE) {
     if (async_state == QSPI_W25Q64_ASYNC_ERROR) {
-      s_qspi_write_errors++;
+      log_note_qspi_error();
       s_write_chunk_len = 0;
       s_write_chunk_first_len = 0;
       s_write_chunk_second_len = 0;
@@ -220,7 +223,7 @@ void log_writer_tick(void) {
         if (!qspi_w25q64_write_async_start(
                 LOG_RING_START, s_write_chunk + s_write_chunk_first_len,
                 s_write_chunk_second_len)) {
-          s_qspi_write_errors++;
+          log_note_qspi_error();
           s_write_chunk_len = 0;
           s_write_chunk_first_len = 0;
           s_write_chunk_second_len = 0;
@@ -466,7 +469,7 @@ static bool log_flush_write_chunk(void) {
 
   if (!qspi_w25q64_write_async_start(s_write_chunk_start_addr, s_write_chunk,
                                     s_write_chunk_first_len)) {
-    s_qspi_write_errors++;
+    log_note_qspi_error();
     s_write_chunk_len = 0;
     s_write_chunk_first_len = 0;
     s_write_chunk_second_len = 0;
@@ -729,4 +732,12 @@ static uint16_t log_rate_from_params(const robot_params_t *params) {
     rate_hz = (float)UINT16_MAX;
   }
   return (uint16_t)(rate_hz + 0.5f);
+}
+
+static void log_note_qspi_error(void) {
+  s_qspi_write_errors++;
+  if (!s_qspi_error_signaled) {
+    led_status_set_flag(LED_STATUS_LOGGING_FAILURE);
+    s_qspi_error_signaled = true;
+  }
 }
