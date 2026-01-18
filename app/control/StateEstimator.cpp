@@ -246,14 +246,14 @@ void StateEstimator::update(const ImuReading &primary, const ImuReading &seconda
             }
         }
 
-        if (!isnan(gyro_diff_dps) &&
+        if (isfinite(gyro_diff_dps) &&
             (gyro_diff_dps > IMU_GYRO_DISAGREE_FAULT_DPS ||
              gyro_pitch_diff_dps > IMU_GYRO_DISAGREE_FAULT_DPS))
         {
             primary_healthy = false;
         }
 
-        if (!isnan(acc_angle_diff_deg) &&
+        if (isfinite(acc_angle_diff_deg) &&
             acc_angle_diff_deg > IMU_ACC_ANGLE_FAULT_DEG)
         {
             primary_healthy = false;
