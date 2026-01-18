@@ -431,13 +431,6 @@ void StateEstimator::update(const ImuReading &primary, const ImuReading &seconda
     ekf_log_valid_ = true;
 }
 
-bool StateEstimator::getLastWheelMechanicalAngles(float &angle_left, float &angle_right) const
-{
-    (void)angle_left;
-    (void)angle_right;
-    return false;
-}
-
 float StateEstimator::getEstimatedYawRate() const
 {
     // Return gyro yaw rate minus estimated bias

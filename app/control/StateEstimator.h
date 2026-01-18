@@ -66,7 +66,6 @@ public:
     float getLastEncVelocity() const { return lastVEnc_; }
     float getLastGyroPitch() const { return lastGyroPitch_; }
     float getLastGyroZ() const { return ekf_log_data_.gyro_z; }
-    bool getLastWheelMechanicalAngles(float &angle_left, float &angle_right) const;
 
 private:
     BalancerEKF ekf_;
