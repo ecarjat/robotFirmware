@@ -64,6 +64,7 @@ static float s_control_dt = CONTROL_DT;
 static float s_last_iq_left = 0.0f;
 static float s_last_iq_right = 0.0f;
 static bool s_output_enabled = true;
+static bool s_motor_disable_failed = false;
 
 /* Blackbox logging */
 static uint32_t s_log_seq = 0U;
@@ -467,7 +468,19 @@ void motion_control_tick(uint32_t now_ms)
     /* Handle state machine outputs */
     if (modes_output.disable_motors)
     {
-        motor_link_enable(false);
+        if (!motor_link_enable(false))
+        {
+            if (!s_motor_disable_failed)
+            {
+                APP_LOG_ERROR("Motor link disable failed");
+                s_motor_disable_failed = true;
+            }
+        }
+        else if (s_motor_disable_failed)
+        {
+            APP_LOG_INFO("Motor link disable recovered");
+            s_motor_disable_failed = false;
+        }
     }
     if (modes_output.reset_pid)
     {

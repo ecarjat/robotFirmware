@@ -84,13 +84,22 @@ uint8_t app_motor_manual_enable(bool enable) {
     motion_control_set_mode(MOTION_MODE_DISARMED);
     motion_control_set_output_enabled(false);
     motor_link_set_control_mode(MOTOR_CONTROL_TORQUE);
-    motor_link_enable(true);
+    if (!motor_link_enable(true)) {
+      APP_LOG_ERROR("Motor link enable failed");
+      s_motor_manual.enabled = 0U;
+      motion_control_set_output_enabled(true);
+      return ROBOT_RPC_STATUS_NOT_READY;
+    }
   } else {
     s_motor_manual.enabled = 0U;
     s_motor_manual.left = 0.0f;
     s_motor_manual.right = 0.0f;
     motor_link_set_wheel_Iq(0.0f, 0.0f, 0.0f);
-    motor_link_enable(false);
+    if (!motor_link_enable(false)) {
+      APP_LOG_ERROR("Motor link disable failed");
+      motion_control_set_output_enabled(true);
+      return ROBOT_RPC_STATUS_NOT_READY;
+    }
     motion_control_set_output_enabled(true);
   }
   return ROBOT_RPC_STATUS_OK;
