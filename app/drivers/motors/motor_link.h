@@ -36,7 +36,7 @@ typedef enum
 
 bool motor_link_init(void);
 void motor_link_poll(void);
-void motor_link_enable(bool on);
+bool motor_link_enable(bool on);
 void motor_link_set_control_mode(motor_control_mode_t mode);
 motor_control_mode_t motor_link_get_control_mode(void);
 void motor_link_set_motor_directions(int8_t left_dir, int8_t right_dir);

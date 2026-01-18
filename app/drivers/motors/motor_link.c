@@ -1002,10 +1002,12 @@ void motor_link_poll(void) {
   s_right_parser_drops = s_right_port.parser.sync_losses;
 }
 
-void motor_link_enable(bool on) {
+bool motor_link_enable(bool on) {
   if (!s_initialized) {
-    return;
+    return false;
   }
+
+  bool ok = true;
 
   bool was_enabled = (s_enable_applied != 0U);
   s_enable_applied = on ? 1U : 0U;
@@ -1019,25 +1021,43 @@ void motor_link_enable(bool on) {
     if (!s_left_port.pending.active &&
         motor_link_port_write_reg_f32(&s_left_port, MOTOR_LINK_REG_TARGET, 0.0f,
                                       true)) {
-      (void)motor_link_port_wait_ack(&s_left_port, MOTOR_LINK_REG_TARGET,
-                                     MOTOR_LINK_ACK_TIMEOUT_MS, NULL);
+      if (!motor_link_port_wait_ack(&s_left_port, MOTOR_LINK_REG_TARGET,
+                                    MOTOR_LINK_ACK_TIMEOUT_MS, NULL)) {
+        ok = false;
+      }
       s_left_sent = 0.0f;
       s_left_sent_valid = 1U;
+    } else if (s_left_port.pending.active) {
+      ok = false;
+    } else {
+      ok = false;
     }
     if (!s_right_port.pending.active &&
         motor_link_port_write_reg_f32(&s_right_port, MOTOR_LINK_REG_TARGET,
                                       0.0f, true)) {
-      (void)motor_link_port_wait_ack(&s_right_port, MOTOR_LINK_REG_TARGET,
-                                     MOTOR_LINK_ACK_TIMEOUT_MS, NULL);
+      if (!motor_link_port_wait_ack(&s_right_port, MOTOR_LINK_REG_TARGET,
+                                    MOTOR_LINK_ACK_TIMEOUT_MS, NULL)) {
+        ok = false;
+      }
       s_right_sent = 0.0f;
       s_right_sent_valid = 1U;
+    } else if (s_right_port.pending.active) {
+      ok = false;
+    } else {
+      ok = false;
     }
   }
 
-  (void)motor_link_port_write_reg_u8(&s_left_port, MOTOR_LINK_REG_ENABLE,
-                                     on ? 1U : 0U, false);
-  (void)motor_link_port_write_reg_u8(&s_right_port, MOTOR_LINK_REG_ENABLE,
-                                     on ? 1U : 0U, false);
+  if (!motor_link_port_write_reg_u8(&s_left_port, MOTOR_LINK_REG_ENABLE,
+                                    on ? 1U : 0U, false)) {
+    ok = false;
+  }
+  if (!motor_link_port_write_reg_u8(&s_right_port, MOTOR_LINK_REG_ENABLE,
+                                    on ? 1U : 0U, false)) {
+    ok = false;
+  }
+
+  return ok;
 }
 
 void motor_link_set_control_mode(motor_control_mode_t mode) {

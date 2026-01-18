@@ -25,7 +25,16 @@ bool app_try_arm_balancing(bool prepare_balance) {
 
   motion_control_set_mode(MOTION_MODE_BALANCING);
 #ifdef ENABLE_MOTORS
-  motor_link_enable(true);
+  if (!motor_link_enable(true)) {
+    APP_LOG_ERROR("Motor link enable failed");
+    motion_control_set_mode(MOTION_MODE_DISARMED);
+    motion_control_set_output_enabled(true);
+    s_motor_manual.enabled = 0U;
+    s_motor_manual.left = 0.0f;
+    s_motor_manual.right = 0.0f;
+    __set_PRIMASK(primask);
+    return false;
+  }
 #endif
   __set_PRIMASK(primask);
   return true;
@@ -48,6 +57,8 @@ void app_disarm_robot(void) {
 #ifdef ENABLE_MOTORS
   /* Explicitly command zero torque before disabling motor drivers */
   motor_link_set_wheel_Iq(0.0f, 0.0f, 0.0f);
-  motor_link_enable(false);
+  if (!motor_link_enable(false)) {
+    APP_LOG_ERROR("Motor link disable failed");
+  }
 #endif
 }
