@@ -54,6 +54,35 @@ static uint32_t param_record_size(uint32_t data_len)
 }
 
 /**
+ * @brief Migrate parameters from older versions to current schema
+ *
+ * Migration assumes older versions are prefix-compatible. When making
+ * non-append changes, add explicit per-version transforms here.
+ */
+static bool param_migrate_params(const param_header_t *header, const uint8_t *data,
+                                 robot_params_t *params_out)
+{
+    if (header == NULL || data == NULL || params_out == NULL)
+    {
+        return false;
+    }
+
+    if (header->version > PARAM_VERSION)
+    {
+        return false;
+    }
+
+    if (header->data_length == 0U || header->data_length > sizeof(robot_params_t))
+    {
+        return false;
+    }
+
+    param_storage_get_defaults(params_out);
+    memcpy(params_out, data, header->data_length);
+    return true;
+}
+
+/**
  * @brief Check if a flash region is erased (all 0xFF)
  */
 static bool param_region_erased(uint32_t address, uint32_t length)
@@ -241,14 +270,12 @@ static bool param_validate_record(uint32_t address, param_header_t *header_out,
         return false;
     }
 
-    if (header->version != PARAM_VERSION)
+    if (header->version > PARAM_VERSION)
     {
-        /* Version mismatch - reject and use defaults.
-         * Future enhancement: implement version migration for backward compatibility. */
         return false;
     }
 
-    if (header->data_length != sizeof(robot_params_t))
+    if (header->data_length == 0U || header->data_length > sizeof(robot_params_t))
     {
         return false;
     }
@@ -277,7 +304,10 @@ static bool param_validate_record(uint32_t address, param_header_t *header_out,
     }
     if (params_out != NULL)
     {
-        memcpy(params_out, data, sizeof(robot_params_t));
+        if (!param_migrate_params(header, data, params_out))
+        {
+            return false;
+        }
     }
     return true;
 }
@@ -293,9 +323,8 @@ static void param_scan_sector(void)
     s_param.cache_valid = false;
 
     uint32_t addr = PARAM_FLASH_BASE;
-    uint32_t record_size = param_record_size(sizeof(robot_params_t));
 
-    while (addr + record_size <= PARAM_FLASH_END)
+    while (addr + PARAM_HEADER_SIZE <= PARAM_FLASH_END)
     {
         if (param_region_erased(addr, PARAM_FLASHWORD_SIZE))
         {
@@ -305,6 +334,26 @@ static void param_scan_sector(void)
         }
 
         param_header_t header;
+        memcpy(&header, (const void *)addr, sizeof(header));
+        if (header.magic != PARAM_MAGIC)
+        {
+            s_param.next_write_addr = addr;
+            break;
+        }
+
+        if (header.data_length == 0U || header.data_length > sizeof(robot_params_t))
+        {
+            s_param.next_write_addr = addr;
+            break;
+        }
+
+        uint32_t record_size = param_record_size(header.data_length);
+        if (addr + record_size > PARAM_FLASH_END)
+        {
+            s_param.next_write_addr = addr;
+            break;
+        }
+
         if (param_validate_record(addr, &header, &s_param_scan_params))
         {
             if (header.sequence >= s_param.current_sequence)
