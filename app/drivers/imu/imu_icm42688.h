@@ -21,6 +21,7 @@ void imu_icm42688_poll(void);
 void imu_icm42688_handle_int1(void);
 bool imu_icm42688_try_get_latest(imu_icm42688_sample_t *out, uint32_t *seq);
 bool imu_icm42688_kick(void);
+uint32_t imu_icm42688_get_last_irq_ms(void);
 
 #ifdef __cplusplus
 }

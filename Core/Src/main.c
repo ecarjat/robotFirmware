@@ -28,6 +28,7 @@
 #include "debug_wdog.h"
 #include "log.h"
 #include "app_config.h"
+#include "system_reboot.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -1508,7 +1509,10 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
+  debug_wdog_checkpoint(WDOG_CP_ERROR_HANDLER, __LINE__);
+  app_log_printf("Error_Handler invoked\r\n");
+  app_log_flush_blocking(50U);
+  system_reboot();
   while (1) {
   }
   /* USER CODE END Error_Handler_Debug */

@@ -102,19 +102,12 @@ static uint32_t param_get_sector(uint32_t address)
 /**
  * @brief Erase the parameter sector
  *
- * Interrupts are disabled during the erase operation because:
- * 1. STM32H7 flash operations block code execution from the same bank
- * 2. If ISRs reside in Bank 1 (common), they cannot execute during erase
- * 3. This prevents system hangs from missed interrupts or flash errors
+ * Keep interrupts enabled during the long erase operation to minimize
+ * latency impact. Note that if ISRs execute from the same flash bank,
+ * instruction fetches will still stall while the erase is active.
  */
 static int param_erase_sector(void)
 {
-    /*
-     * Risk accepted: flash erase disables interrupts for the full duration of the
-     * erase operation on STM32H7.
-     * WARNING: This can take 1-2 seconds. Ensure IWDG timeout is sufficient
-     * or that a watchdog reset during save is acceptable.
-     */
     debug_wdog_refresh();
     uint32_t primask = __get_PRIMASK();
     __disable_irq();
@@ -125,6 +118,7 @@ static int param_erase_sector(void)
         __set_PRIMASK(primask);
         return PARAM_ERR_FLASH;
     }
+    __set_PRIMASK(primask);
 
     FLASH_EraseInitTypeDef erase = {0};
     erase.TypeErase = FLASH_TYPEERASE_SECTORS;
@@ -135,7 +129,9 @@ static int param_erase_sector(void)
 
     uint32_t sector_error = 0U;
     status = HAL_FLASHEx_Erase(&erase, &sector_error);
+    debug_wdog_refresh();
 
+    __disable_irq();
     HAL_FLASH_Lock();
     __set_PRIMASK(primask);
 

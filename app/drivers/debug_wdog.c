@@ -164,6 +164,7 @@ const char* debug_wdog_checkpoint_name(uint16_t checkpoint_id)
         case WDOG_CP_APP_INIT_DONE:      return "APP_INIT_DONE";
         case WDOG_CP_IDLE_LOOP:          return "IDLE_LOOP";
         case WDOG_CP_SCHED_TICK:         return "SCHEDULER TICK";
+        case WDOG_CP_ERROR_HANDLER:      return "ERROR_HANDLER";
         default:                         return "UNKNOWN";
     }
 }

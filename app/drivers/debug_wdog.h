@@ -49,6 +49,7 @@
 #define WDOG_CP_IDLE_LOOP            0x001D
 #define WDOG_CP_SEND_TELEM           0x001E
 #define WDOG_CP_SCHED_TICK           0x001F
+#define WDOG_CP_ERROR_HANDLER        0x0020
 
 /* Macro for setting checkpoint with file/line info */
 #define WDOG_CHECKPOINT(id) debug_wdog_checkpoint((id), __LINE__)

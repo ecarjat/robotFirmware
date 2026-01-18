@@ -31,10 +31,13 @@ typedef struct
     bool estimate_valid;          /* EKF estimate is valid */
     float theta_rad;              /* Current pitch angle (rad) */
     float theta_kill_rad;         /* Kill-switch threshold (rad) */
+    bool theta_acc_valid;         /* Raw accel pitch is valid */
+    float theta_acc_rad;          /* Raw accel pitch angle (rad) */
 
     /* IMU health */
     bool imu_ok;                  /* At least one IMU is producing valid data */
     uint32_t last_imu_ok_ms;      /* Timestamp of last valid IMU sample */
+    uint32_t last_imu_irq_ms;     /* Timestamp of last IMU DRDY interrupt */
 
     /* Motor link health */
     bool motor_ok;                /* Motor link is responding */

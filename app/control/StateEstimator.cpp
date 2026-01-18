@@ -260,6 +260,9 @@ void StateEstimator::update(const ImuReading &primary, const ImuReading &seconda
         }
     }
 
+    bool switched = false;
+    bool prev_use_secondary = use_secondary_;
+
     if (!use_secondary_)
     {
         if (!primary_healthy)
@@ -313,6 +316,11 @@ void StateEstimator::update(const ImuReading &primary, const ImuReading &seconda
         }
     }
 
+    if (use_secondary_ != prev_use_secondary)
+    {
+        switched = true;
+    }
+
     const bool active_valid = use_secondary_ ? secondary.valid : primary.valid;
     const float *accel_body = use_secondary_ ? accel_secondary_body : accel_primary_body;
     const float *gyro_body = use_secondary_ ? gyro_secondary_body : gyro_primary_body;
@@ -352,6 +360,17 @@ void StateEstimator::update(const ImuReading &primary, const ImuReading &seconda
     }
     float gyro_pitch = gyro_body[1];
     float gyro_yaw = gyro_body[2];
+
+    if (switched)
+    {
+        float theta_init = estimate_.valid ? estimate_.theta : theta_acc;
+        if (!isfinite(theta_init))
+        {
+            theta_init = 0.0f;
+        }
+        float pos_init = estimate_.valid ? estimate_.x : 0.0f;
+        ekf_.reset(theta_init, pos_init);
+    }
 
     float theta_var = ekf_.getThetaMeasurementVarianceBase();
     if (gate_accel)

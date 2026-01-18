@@ -389,3 +389,8 @@ bool imu_bmi270_try_get_latest(imu_bmi270_sample_t *out, uint32_t *seq)
     *out = sample;
     return true;
 }
+
+uint32_t imu_bmi270_get_last_irq_ms(void)
+{
+    return s_last_irq_ms;
+}

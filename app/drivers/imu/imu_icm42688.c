@@ -419,3 +419,8 @@ bool imu_icm42688_try_get_latest(imu_icm42688_sample_t *out, uint32_t *seq)
     *out = sample;
     return true;
 }
+
+uint32_t imu_icm42688_get_last_irq_ms(void)
+{
+    return s_last_irq_ms;
+}

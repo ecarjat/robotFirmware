@@ -5,6 +5,8 @@
 #include "motor_link.h"
 #include "robot_protocol.h"
 
+#include <math.h>
+
 
 app_motor_manual_t s_motor_manual = {0U, 0.0f, 0.0f};
 
@@ -27,6 +29,12 @@ void app_motor_manual_apply(void) {
   }
   float left = s_motor_manual.left;
   float right = s_motor_manual.right;
+  if (!isfinite(left)) {
+    left = 0.0f;
+  }
+  if (!isfinite(right)) {
+    right = 0.0f;
+  }
   if (left > 1.0f) {
     left = 1.0f;
   } else if (left < -1.0f) {
@@ -47,6 +55,9 @@ uint8_t app_motor_manual_run(uint8_t side, float intensity) {
 #ifdef ENABLE_MOTORS
   if (!s_motor_manual.enabled) {
     return ROBOT_RPC_STATUS_NOT_READY;
+  }
+  if (!isfinite(intensity)) {
+    return ROBOT_RPC_STATUS_BAD_PARAM;
   }
   if (side == ROBOT_MOTOR_SIDE_LEFT) {
     s_motor_manual.left = intensity;

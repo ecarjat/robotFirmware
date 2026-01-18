@@ -51,12 +51,16 @@ void motion_modes_step(const motion_modes_input_t *input, motion_modes_output_t 
     uint32_t now_ms = input->now_ms;
     bool log_exit = false;
     bool reason_kill = false;
+    bool reason_kill_raw = false;
     bool reason_imu_fallen = false;
     bool reason_motor_fallen = false;
     bool reason_imu_fatal = false;
+    bool reason_imu_irq_fatal = false;
     bool reason_motor_fatal = false;
     uint32_t imu_age = 0U;
+    uint32_t imu_irq_age = 0U;
     uint32_t motor_age = 0U;
+    bool kill_trigger = false;
 
     if (start_mode == MOTION_MODE_BALANCING)
     {
@@ -64,19 +68,38 @@ void motion_modes_step(const motion_modes_input_t *input, motion_modes_output_t 
         {
             imu_age = now_ms - input->last_imu_ok_ms;
         }
+        if (input->last_imu_irq_ms != 0U)
+        {
+            imu_irq_age = now_ms - input->last_imu_irq_ms;
+        }
         if (input->last_motor_ok_ms != 0U)
         {
             motor_age = now_ms - input->last_motor_ok_ms;
         }
-        reason_kill = input->estimate_valid &&
-                      input->theta_kill_rad > 0.0f &&
-                      fabsf(input->theta_rad) > input->theta_kill_rad;
+        if (input->theta_kill_rad > 0.0f)
+        {
+            if (input->estimate_valid &&
+                fabsf(input->theta_rad) > input->theta_kill_rad)
+            {
+                kill_trigger = true;
+            }
+            else if (!input->estimate_valid &&
+                     input->theta_acc_valid &&
+                     fabsf(input->theta_acc_rad) > input->theta_kill_rad)
+            {
+                kill_trigger = true;
+                reason_kill_raw = true;
+            }
+        }
+        reason_kill = kill_trigger;
         reason_imu_fallen = (input->last_imu_ok_ms != 0U) &&
                             (imu_age > IMU_FAULT_FALLEN_MS);
         reason_motor_fallen = (input->last_motor_ok_ms != 0U) &&
                               (motor_age > MOTOR_LINK_FAULT_FALLEN_MS);
         reason_imu_fatal = (input->last_imu_ok_ms != 0U) &&
                            (imu_age > IMU_FAULT_FATAL_MS);
+        reason_imu_irq_fatal = (input->last_imu_irq_ms != 0U) &&
+                               (imu_irq_age > IMU_FAULT_FATAL_MS);
         reason_motor_fatal = (input->last_motor_ok_ms != 0U) &&
                              (motor_age > MOTOR_LINK_FAULT_FATAL_MS);
     }
@@ -92,9 +115,7 @@ void motion_modes_step(const motion_modes_input_t *input, motion_modes_output_t 
         bool trigger_fallen = false;
 
         /* Kill-switch check */
-        if (input->estimate_valid &&
-            input->theta_kill_rad > 0.0f &&
-            fabsf(input->theta_rad) > input->theta_kill_rad)
+        if (kill_trigger)
         {
             trigger_fallen = true;
         }
@@ -149,6 +170,11 @@ void motion_modes_step(const motion_modes_input_t *input, motion_modes_output_t 
         {
             trigger_fault = true;
         }
+        if (input->last_imu_irq_ms != 0U &&
+            (now_ms - input->last_imu_irq_ms) > IMU_FAULT_FATAL_MS)
+        {
+            trigger_fault = true;
+        }
 
         /* Fatal motor link fault */
         if (input->last_motor_ok_ms != 0U &&
@@ -176,9 +202,18 @@ void motion_modes_step(const motion_modes_input_t *input, motion_modes_output_t 
             bool logged = false;
             if (reason_kill)
             {
-                MOTION_LOG_ERROR("Mode BALANCING -> FALLEN reason=kill theta=%.3f kill=%.3f",
-                                 (double)input->theta_rad,
-                                 (double)input->theta_kill_rad);
+                if (reason_kill_raw)
+                {
+                    MOTION_LOG_ERROR("Mode BALANCING -> FALLEN reason=kill_raw theta_acc=%.3f kill=%.3f",
+                                     (double)input->theta_acc_rad,
+                                     (double)input->theta_kill_rad);
+                }
+                else
+                {
+                    MOTION_LOG_ERROR("Mode BALANCING -> FALLEN reason=kill theta=%.3f kill=%.3f",
+                                     (double)input->theta_rad,
+                                     (double)input->theta_kill_rad);
+                }
                 logged = true;
             }
             if (reason_imu_fallen)
@@ -205,6 +240,12 @@ void motion_modes_step(const motion_modes_input_t *input, motion_modes_output_t 
             {
                 MOTION_LOG_ERROR("Mode BALANCING -> FAULT reason=imu fatal age=%lu ms",
                                  (unsigned long)imu_age);
+                logged = true;
+            }
+            if (reason_imu_irq_fatal)
+            {
+                MOTION_LOG_ERROR("Mode BALANCING -> FAULT reason=imu drdy timeout age=%lu ms",
+                                 (unsigned long)imu_irq_age);
                 logged = true;
             }
             if (reason_motor_fatal)

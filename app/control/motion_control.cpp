@@ -56,6 +56,7 @@ constexpr float kIcmGyroScale = (kIcmGyroRangeDps * kDegToRad) / 32768.0f;
 static uint32_t s_last_tick_ms = 0U;
 static float s_max_turn_rate = PARAM_MAX_TURN_RATE;
 static uint32_t s_last_imu_ok_ms = 0U;
+static uint32_t s_last_imu_irq_ms = 0U;
 static uint32_t s_last_motor_ok_ms = 0U;
 static float s_control_dt = CONTROL_DT;
 
@@ -212,6 +213,7 @@ void motion_control_init(void)
 
     s_last_tick_ms = 0U;
     s_last_imu_ok_ms = 0U;
+    s_last_imu_irq_ms = 0U;
     s_last_motor_ok_ms = 0U;
 #if SENSOR_ENABLE_BMI270
     s_bmi_have = false;
@@ -410,6 +412,25 @@ void motion_control_tick(uint32_t now_ms)
     }
 
     bool imu_ok = primary.valid || secondary.valid;
+    uint32_t last_irq_ms = 0U;
+#if SENSOR_ENABLE_BMI270
+    uint32_t bmi_irq_ms = imu_bmi270_get_last_irq_ms();
+    if (bmi_irq_ms > last_irq_ms)
+    {
+        last_irq_ms = bmi_irq_ms;
+    }
+#endif
+#if SENSOR_ENABLE_ICM42688
+    uint32_t icm_irq_ms = imu_icm42688_get_last_irq_ms();
+    if (icm_irq_ms > last_irq_ms)
+    {
+        last_irq_ms = icm_irq_ms;
+    }
+#endif
+    if (last_irq_ms != 0U)
+    {
+        s_last_imu_irq_ms = last_irq_ms;
+    }
     if (imu_ok)
     {
         s_last_imu_ok_ms = now_ms;
@@ -422,6 +443,8 @@ void motion_control_tick(uint32_t now_ms)
     s_controller.setYawRates(gyro_z_filtered, yaw_rate_enc);
 
     StateEstimate estimate = s_estimator.getEstimate();
+    float theta_acc = s_estimator.getLastThetaAcc();
+    bool theta_acc_valid = imu_ok && isfinite(theta_acc);
 
     /* Populate state machine input and evaluate transitions */
     motion_modes_input_t modes_input = {
@@ -429,8 +452,11 @@ void motion_control_tick(uint32_t now_ms)
         .estimate_valid = estimate.valid,
         .theta_rad = estimate.theta,
         .theta_kill_rad = g_robot_params.balance.thetaKill,
+        .theta_acc_valid = theta_acc_valid,
+        .theta_acc_rad = theta_acc,
         .imu_ok = imu_ok,
         .last_imu_ok_ms = s_last_imu_ok_ms,
+        .last_imu_irq_ms = s_last_imu_irq_ms,
         .motor_ok = wheel_ok,
         .last_motor_ok_ms = s_last_motor_ok_ms,
     };
