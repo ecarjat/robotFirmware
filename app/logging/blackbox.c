@@ -1,5 +1,6 @@
 #include "blackbox.h"
 
+#include "app_config.h"
 #include "crc32.h"
 #include "main.h"
 #include "blackbox_dump.h"
@@ -98,11 +99,13 @@ static bool s_initialized = false;
 static bool log_load_meta(void);
 static bool log_save_meta(void);
 static bool log_validate_meta(const LogMeta *meta);
+static bool log_validate_ring_tail(void);
 static void log_format_meta(void);
 static bool log_flush_write_chunk(void);
 static void log_advance_write_addr_after_chunk(void);
 static uint16_t log_rate_from_params(const robot_params_t *params);
 static void log_meta_tick(qspi_w25q64_async_state_t async_state);
+static bool log_erase_ahead_ready(void);
 
 void log_init(const robot_params_t *params) {
   if (s_initialized) {
@@ -130,12 +133,18 @@ void log_init(const robot_params_t *params) {
     log_format_meta();
   }
 
+  if (!log_validate_ring_tail()) {
+    APP_LOG_WARN("Log ring invalid - resetting write pointer");
+    log_format_meta();
+  }
+
   /* Increment boot count and save */
   s_boot_count++;
   log_save_meta();
 
   /* Store initial write address for session-based dump calculations */
   s_write_addr_at_boot = s_write_addr;
+  s_next_erase_addr = s_write_addr & ~(W25Q64_SECTOR_SIZE - 1);
 
   s_initialized = true;
 }
@@ -198,7 +207,6 @@ void log_writer_tick(void) {
   if (s_write_state != LOG_WRITE_IDLE) {
     if (async_state == QSPI_W25Q64_ASYNC_ERROR) {
       s_qspi_write_errors++;
-      log_advance_write_addr_after_chunk();
       s_write_chunk_len = 0;
       s_write_chunk_first_len = 0;
       s_write_chunk_second_len = 0;
@@ -209,7 +217,6 @@ void log_writer_tick(void) {
                 LOG_RING_START, s_write_chunk + s_write_chunk_first_len,
                 s_write_chunk_second_len)) {
           s_qspi_write_errors++;
-          log_advance_write_addr_after_chunk();
           s_write_chunk_len = 0;
           s_write_chunk_first_len = 0;
           s_write_chunk_second_len = 0;
@@ -241,6 +248,10 @@ void log_writer_tick(void) {
 
   /* Check if flash is busy */
   if (qspi_w25q64_is_busy()) {
+    return;
+  }
+
+  if (!log_erase_ahead_ready()) {
     return;
   }
 
@@ -322,6 +333,10 @@ void log_writer_tick(void) {
 
 void log_erase_tick(void) {
   if (!s_initialized) {
+    return;
+  }
+
+  if (log_is_dumping()) {
     return;
   }
 
@@ -418,7 +433,6 @@ static bool log_flush_write_chunk(void) {
   if (!qspi_w25q64_write_async_start(s_write_chunk_start_addr, s_write_chunk,
                                     s_write_chunk_first_len)) {
     s_qspi_write_errors++;
-    log_advance_write_addr_after_chunk();
     s_write_chunk_len = 0;
     s_write_chunk_first_len = 0;
     s_write_chunk_second_len = 0;
@@ -608,6 +622,32 @@ static bool log_validate_meta(const LogMeta *meta) {
   return true;
 }
 
+static bool log_validate_ring_tail(void) {
+  if (!s_initialized && !qspi_w25q64_is_ready()) {
+    return false;
+  }
+
+  if (s_write_addr == LOG_RING_START) {
+    return true;
+  }
+
+  uint32_t addr = s_write_addr - LOG_RECORD_SIZE;
+  if (s_write_addr <= LOG_RING_START) {
+    addr = LOG_RING_END - LOG_RECORD_SIZE;
+  }
+
+  LogRecord rec;
+  if (!qspi_w25q64_read(addr, (uint8_t *)&rec, sizeof(rec))) {
+    return false;
+  }
+
+  if (rec.magic != LOG_RECORD_MAGIC || rec.version != LOG_RECORD_VERSION) {
+    return false;
+  }
+
+  return true;
+}
+
 static void log_format_meta(void) {
   /* Initialize state */
   s_write_addr = LOG_RING_START;
@@ -617,9 +657,21 @@ static void log_format_meta(void) {
   s_meta_sequence = 0;
   s_meta_save_state = LOG_META_SAVE_IDLE;
   s_meta_op_inflight = LOG_META_OP_NONE;
+  s_next_erase_addr = LOG_RING_START;
 
   /* Save initial metadata */
   log_save_meta();
+}
+
+static bool log_erase_ahead_ready(void) {
+  uint32_t erase_addr = s_next_erase_addr;
+  uint32_t write_addr = s_write_addr;
+
+  if (erase_addr < write_addr) {
+    erase_addr += LOG_RING_SIZE;
+  }
+  uint32_t sectors_ahead = (erase_addr - write_addr) / W25Q64_SECTOR_SIZE;
+  return sectors_ahead >= LOG_PREERASE_AHEAD;
 }
 
 static uint16_t log_rate_from_params(const robot_params_t *params) {

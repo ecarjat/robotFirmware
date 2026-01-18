@@ -307,20 +307,17 @@ static void dump_reset_context(void) {
 }
 
 static bool dump_calculate_window(uint32_t seconds) {
-  /* Get current and boot-time logger state */
+  /* Get current logger state */
   uint32_t write_addr = log_get_write_addr();
-  uint32_t boot_write_addr = log_get_boot_write_addr();
   uint32_t current_seq = log_get_seq();
 
-  /* Compute how many bytes are actually committed to QSPI this session. */
-  uint32_t bytes_written = 0;
-  if (write_addr >= boot_write_addr) {
-    bytes_written = write_addr - boot_write_addr;
-  } else {
-    bytes_written = (LOG_RING_END - boot_write_addr) +
-                    (write_addr - LOG_RING_START);
+  log_stats_t stats = {0};
+  log_get_stats(&stats);
+  uint32_t capacity_records = LOG_RING_SIZE / LOG_RECORD_SIZE;
+  uint32_t records_written = stats.total_records;
+  if (records_written > capacity_records) {
+    records_written = capacity_records;
   }
-  uint32_t records_written = bytes_written / LOG_RECORD_SIZE;
 
   /* Determine how many records to dump */
   uint16_t rate_hz = log_get_rate_hz();
@@ -342,35 +339,16 @@ static bool dump_calculate_window(uint32_t seconds) {
   uint32_t bytes = records * LOG_RECORD_SIZE;
 
   /*
-   * Calculate the start address for the dump. This is complex because
-   * the valid data from this session might wrap around the ring buffer.
-   *
-   * We have two main scenarios:
-   * 1. The data written this session is contiguous (no wrap).
-   * 2. The data has wrapped around the end of the ring buffer.
+   * Calculate the start address by walking back from the current write
+   * pointer, wrapping around the ring if needed.
    */
-  uint32_t start_addr;
-  if (write_addr >= boot_write_addr) {
-    /* SCENARIO 1: No wrap during this session.
-     * Data is in a single block: [boot_write_addr, write_addr)
-     */
+  uint32_t start_addr = write_addr;
+  uint32_t offset = write_addr - LOG_RING_START;
+  if (bytes <= offset) {
     start_addr = write_addr - bytes;
   } else {
-    /* SCENARIO 2: A wrap has occurred during this session.
-     * Data is in two blocks:
-     * - [boot_write_addr, LOG_RING_END)
-     * - [LOG_RING_START, write_addr)
-     */
-    uint32_t bytes_after_wrap = write_addr - LOG_RING_START;
-
-    if (bytes <= bytes_after_wrap) {
-      /* The entire dump fits in the block at the start of the ring */
-      start_addr = write_addr - bytes;
-    } else {
-      /* The dump spans both blocks (pre and post-wrap) */
-      uint32_t deficit = bytes - bytes_after_wrap;
-      start_addr = LOG_RING_END - deficit;
-    }
+    uint32_t deficit = bytes - offset;
+    start_addr = LOG_RING_END - deficit;
   }
 
 
