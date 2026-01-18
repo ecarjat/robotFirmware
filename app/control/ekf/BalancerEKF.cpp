@@ -20,7 +20,8 @@ BalancerEKF::BalancerEKF()
       diag_{},
       diag_valid_(false),
       theta_r_base_(0.0f),
-      damping_steps_remaining_(0)
+      damping_steps_remaining_(0),
+      nan_reset_count_(0)
 {
 }
 
@@ -170,6 +171,14 @@ bool BalancerEKF::step(float thetaAcc, float vEnc, float posEnc,
 
     ekf_predict(&ekf_, fx, F, Q_);
 
+    // Validate state after predict - NaN can propagate from bad inputs or numerical issues
+    if (!isStateValid()) {
+        nan_reset_count_++;
+        reset(0.0f, 0.0f);
+        diag_valid_ = false;
+        return false;
+    }
+
     // Measurement model h(x) = [theta, xDot, x, yawRate]
     // yawRate predicted = gyroYaw - yawBias
     float predictedYawRate = gyroYaw - ekf_.x[6];
@@ -289,6 +298,15 @@ bool BalancerEKF::step(float thetaAcc, float vEnc, float posEnc,
     diag_valid_ = false;
 
     bool ok = ekf_update(&ekf_, z, hx, H, R_step);
+
+    // Validate state after update - catch NaN propagation from measurement fusion
+    if (!isStateValid()) {
+        nan_reset_count_++;
+        reset(0.0f, 0.0f);
+        diag_valid_ = false;
+        return false;
+    }
+
     if (ok) {
         diag_.p00 = ekf_.P[0 * EKF_N + 0];
         diag_.p01 = ekf_.P[0 * EKF_N + 4];
@@ -323,4 +341,14 @@ bool BalancerEKF::getDiag(BalancerEkfDiag& out) const
 float BalancerEKF::getThetaMeasurementVarianceBase() const
 {
     return theta_r_base_;
+}
+
+bool BalancerEKF::isStateValid() const
+{
+    for (int i = 0; i < EKF_N; ++i) {
+        if (!isfinite(ekf_.x[i])) {
+            return false;
+        }
+    }
+    return true;
 }

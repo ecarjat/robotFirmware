@@ -252,7 +252,10 @@ void log_writer_tick(void) {
   }
 
   if (!log_erase_ahead_ready()) {
-    return;
+    log_erase_tick();
+    if (!log_erase_ahead_ready()) {
+      return;
+    }
   }
 
   if (s_write_state != LOG_WRITE_IDLE) {
@@ -397,6 +400,32 @@ void log_get_stats(log_stats_t *out) {
     out->fill_seconds = capacity_records / rate_hz;
   } else {
     out->fill_seconds = 0;
+  }
+}
+
+bool log_flush_pending(uint32_t timeout_ms) {
+  if (!s_initialized) {
+    return false;
+  }
+
+  uint32_t start = HAL_GetTick();
+  while (1) {
+    log_writer_tick();
+    log_erase_tick();
+
+    if (s_write_state == LOG_WRITE_IDLE && s_queue_head == s_queue_tail) {
+      return true;
+    }
+
+    if (timeout_ms == 0U) {
+      return false;
+    }
+
+    uint32_t now = HAL_GetTick();
+    if ((now - start) >= timeout_ms) {
+      return false;
+    }
+    HAL_Delay(1U);
   }
 }
 
@@ -625,6 +654,15 @@ static bool log_validate_meta(const LogMeta *meta) {
 static bool log_validate_ring_tail(void) {
   if (!s_initialized && !qspi_w25q64_is_ready()) {
     return false;
+  }
+
+  uint32_t start = HAL_GetTick();
+  while (qspi_w25q64_is_busy()) {
+    if ((HAL_GetTick() - start) >= 50U) {
+      APP_LOG_WARN("QSPI busy during ring validation");
+      return true;
+    }
+    HAL_Delay(1U);
   }
 
   if (s_write_addr == LOG_RING_START) {

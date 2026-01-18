@@ -34,6 +34,15 @@ static StateEstimator s_estimator;
 namespace {
 constexpr float kGravity = 9.80665f;
 constexpr float kDegToRad = 0.01745329252f;
+
+/**
+ * @brief Check if a control output value is safe to send to motors
+ * @return true if value is finite (not NaN, not inf), false otherwise
+ */
+inline bool is_control_value_safe(float value)
+{
+    return isfinite(value);
+}
 constexpr float kBmiAccelRangeG = 4.0f;
 constexpr float kBmiGyroRangeDps = 500.0f;
 constexpr float kIcmAccelRangeG = 4.0f;
@@ -445,12 +454,35 @@ void motion_control_tick(uint32_t now_ms)
         if (estimate.valid)
         {
             MotionController::Command cmd = s_controller.computeControl(estimate, dt_s);
-            s_last_iq_left = cmd.iq.iqLeft;
-            s_last_iq_right = cmd.iq.iqRight;
-            if (s_output_enabled)
+
+            /* Safety check: validate control outputs before sending to motors */
+            bool iq_left_safe = is_control_value_safe(cmd.iq.iqLeft);
+            bool iq_right_safe = is_control_value_safe(cmd.iq.iqRight);
+
+            if (iq_left_safe && iq_right_safe)
             {
-                motor_link_set_wheel_Iq(cmd.iq.iqLeft, cmd.iq.iqRight,
-                                        g_robot_params.balance.IqMax);
+                s_last_iq_left = cmd.iq.iqLeft;
+                s_last_iq_right = cmd.iq.iqRight;
+                if (s_output_enabled)
+                {
+                    motor_link_set_wheel_Iq(cmd.iq.iqLeft, cmd.iq.iqRight,
+                                            g_robot_params.balance.IqMax);
+                }
+            }
+            else
+            {
+                /* NaN/Inf detected in control output - emergency stop */
+                APP_LOG_ERROR("SAFETY: Invalid control output detected "
+                              "(L=%d R=%d) - emergency zero",
+                              iq_left_safe ? 1 : 0, iq_right_safe ? 1 : 0);
+                s_last_iq_left = 0.0f;
+                s_last_iq_right = 0.0f;
+                if (s_output_enabled)
+                {
+                    motor_link_set_wheel_Iq(0.0f, 0.0f, 0.0f);
+                }
+                /* Reset controller state to clear any corrupted integrators */
+                s_controller.resetPidState();
             }
         }
         else

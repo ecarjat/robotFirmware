@@ -37,6 +37,46 @@ extern "C" {
  *   - 4 bytes: CRC32 of entire record (excluding this field)
  *
  * Records are always 32-byte aligned for STM32H7 flash programming.
+ *
+ * ============================================================================
+ * FLASH ERASE TIMING vs WATCHDOG REQUIREMENTS
+ * ============================================================================
+ *
+ * CRITICAL: Flash operations disable interrupts and block the CPU.
+ *
+ * Timing constraints:
+ *   - STM32H7 128KB sector erase: 1000-2000ms typical, 4000ms max (datasheet)
+ *   - STM32H7 32-byte flash word program: ~20us per word
+ *   - Full parameter write (after erase): ~10ms
+ *
+ * IWDG Configuration (in Core/Src/main.c MX_IWDG1_Init):
+ *   - LSI clock: 32 kHz
+ *   - Prescaler: 256
+ *   - Reload: 500
+ *   - Timeout = (500 * 256) / 32000 = 4000ms = 4 seconds
+ *
+ * Safety margin analysis:
+ *   - Worst-case erase: 4000ms (per datasheet max)
+ *   - IWDG timeout: 4000ms
+ *   - Margin: 0ms (INSUFFICIENT for worst case!)
+ *
+ * MITIGATIONS:
+ *   1. debug_wdog_refresh() is called immediately before disabling interrupts
+ *   2. param_storage_can_save() prevents saves during MOTION_MODE_BALANCING
+ *   3. Typical erase time is 1-2 seconds, well within the 4-second timeout
+ *
+ * RISK ASSESSMENT:
+ *   - In practice, erases complete in 1-2 seconds (50% of timeout)
+ *   - If a flash cell is degraded, erase can approach worst-case timing
+ *   - A watchdog reset during parameter save is recoverable (params not saved)
+ *   - Robot must be stationary during saves (enforced by can_save check)
+ *
+ * RECOMMENDATIONS:
+ *   - If watchdog resets occur during saves, increase IWDG timeout to 8 seconds
+ *   - Consider dual-bank flash to allow erase during execution from other bank
+ *   - Monitor for PARAM_ERR_FLASH returns which may indicate flash degradation
+ *
+ * ============================================================================
  */
 
 #define PARAM_MAGIC             0x524F424FUL  /* 'ROBO' */

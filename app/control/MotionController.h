@@ -26,6 +26,7 @@ struct InnerCtrlDiag {
     bool sat_left;        /**< Left wheel saturated flag */
     bool sat_right;       /**< Right wheel saturated flag */
     bool fallback_to_pid; /**< Forced fallback to PID due to safety */
+    bool cross_antiwindup_active; /**< Cross-controller anti-windup engaged */
     InnerLongMode requested_mode;
     InnerLongMode active_mode;
 };

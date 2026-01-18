@@ -72,6 +72,10 @@ bool log_dump_last_seconds(uint32_t seconds) {
     return false;
   }
 
+  if (!log_flush_pending(200U)) {
+    APP_LOG_WARN("Dump flush timed out - proceeding with partial queue");
+  }
+
   /* Calculate dump window */
   if (!dump_calculate_window(seconds)) {
     return false;

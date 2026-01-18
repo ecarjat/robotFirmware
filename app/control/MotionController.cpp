@@ -1,5 +1,6 @@
 #include "MotionController.h"
 #include "app_config.h"
+#include "config_control.h"
 
 #include <math.h>
 #include <string.h>
@@ -78,7 +79,16 @@ void MotionController::setRobotParams(const RobotParams& params)
     _robot = params;
     _maxForwardVelocity = params.maxForwardVelocity;
     _maxWheelTorque = params.maxWheelTorque;
-    _motorKt = params.motorKt;
+
+    /* Validate motorKt to prevent division by zero and ensure valid torque calculations.
+     * A zero or negative motorKt would cause maxIqPhysical calculation to fail. */
+    if (params.motorKt > kGainEpsilon) {
+        _motorKt = params.motorKt;
+    } else {
+        APP_LOG_WARN("Invalid motorKt=%.4f, using default %.4f",
+                     (double)params.motorKt, (double)PARAM_MOTOR_KT);
+        _motorKt = PARAM_MOTOR_KT;
+    }
 }
 
 void MotionController::setBalanceGains(const balance_gains_t& gains)
@@ -385,6 +395,51 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     _lastPitchI = i;
     _lastPitchD = d;
 
+    /* ========== Cross-controller anti-windup ========== */
+    /*
+     * When the inner (pitch) loop saturates, the outer (velocity) loop's
+     * integral can wind up because it doesn't know the system can't achieve
+     * the requested pitch. We detect this condition and reduce the velocity
+     * integral to prevent excessive windup.
+     *
+     * Condition: pitch output saturated AND velocity error would push
+     * pitchTarget further in the saturating direction.
+     *
+     * - If uBal is saturated positive (robot falling forward, needs more torque)
+     *   and velocity error is negative (going slower than target, pitchTarget
+     *   would increase to speed up), then velocity integral is making things worse.
+     * - If uBal is saturated negative and velocity error is positive, same issue.
+     */
+    bool crossAntiWindupActive = false;
+    if (saturated)
+    {
+        float velocityError = _targetVel - state.xDot;
+        bool velIntegralMakesWorse = false;
+
+        if (outputPreSat > outputLimit && velocityError < 0.0f)
+        {
+            /* Saturated positive, velocity error wants more pitch (to accelerate) */
+            velIntegralMakesWorse = true;
+        }
+        else if (outputPreSat < -outputLimit && velocityError > 0.0f)
+        {
+            /* Saturated negative, velocity error wants more pitch (to decelerate) */
+            velIntegralMakesWorse = true;
+        }
+
+        if (velIntegralMakesWorse)
+        {
+            /* Apply decay to velocity integral to help recovery.
+             * Time constant ~0.5s means integral decays to 37% in 0.5s.
+             * This is aggressive enough to prevent sustained windup while
+             * being smooth enough to avoid control discontinuities. */
+            constexpr float kCrossAntiWindupTau = 0.5f;  /* seconds */
+            float decayFactor = expf(-dtSeconds / kCrossAntiWindupTau);
+            _velocityPid.integral *= decayFactor;
+            crossAntiWindupActive = true;
+        }
+    }
+
     float uSumPid = uBal - _velDampGain * state.xDot;
 
     /* ========== LQR u_sum computation ========== */
@@ -444,6 +499,7 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     _diag.u_diff_cmd = uTurn;
     _diag.alpha = _alpha;
     _diag.fallback_to_pid = false;
+    _diag.cross_antiwindup_active = crossAntiWindupActive;
     _diag.requested_mode = _requestedMode;
     _diag.active_mode = _activeMode;
     _diagValid = true;

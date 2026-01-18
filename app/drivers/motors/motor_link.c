@@ -1083,6 +1083,13 @@ void motor_link_set_wheel_Iq(float left_A, float right_A, float max_A) {
     return;
   }
 
+  /* Defense-in-depth: reject NaN/Inf values at driver level */
+  if (!isfinite(left_A) || !isfinite(right_A) || !isfinite(max_A)) {
+    left_A = 0.0f;
+    right_A = 0.0f;
+    max_A = 0.0f;
+  }
+
   float left = motor_link_clamp(left_A * s_left_dir, max_A);
   float right = motor_link_clamp(right_A * s_right_dir, max_A);
   if (!s_enable_applied) {
@@ -1137,6 +1144,12 @@ void motor_link_set_wheel_Iq(float left_A, float right_A, float max_A) {
 }
 
 void motor_link_set_wheel_torques(float left_Nm, float right_Nm, float max_Nm) {
+  /* Defense-in-depth: reject NaN/Inf input values */
+  if (!isfinite(left_Nm) || !isfinite(right_Nm) || !isfinite(max_Nm)) {
+    motor_link_set_wheel_Iq(0.0f, 0.0f, 0.0f);
+    return;
+  }
+
   float kt = motor_link_resolve_kt();
   if (kt <= 0.0f) {
     return;

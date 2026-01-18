@@ -81,6 +81,14 @@ void log_writer_tick(void);
 void log_erase_tick(void);
 
 /**
+ * @brief Flush queued records to QSPI (best-effort, bounded time)
+ *
+ * @param timeout_ms Maximum time to spend flushing
+ * @return true if queue drained and no pending write, false otherwise
+ */
+bool log_flush_pending(uint32_t timeout_ms);
+
+/**
  * @brief Get logging statistics
  *
  * @param out Pointer to stats structure

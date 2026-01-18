@@ -56,6 +56,12 @@ public:
     // Check if we're in a post-reset damping period
     bool isInDampingPeriod() const { return damping_steps_remaining_ > 0; }
 
+    // Check if the state vector is valid (no NaN/inf values)
+    bool isStateValid() const;
+
+    // Get count of NaN resets since startup
+    uint32_t getNanResetCount() const { return nan_reset_count_; }
+
 private:
     void initState();
     void initNoiseCovariances();
@@ -70,6 +76,7 @@ private:
     bool diag_valid_;
     float theta_r_base_;
     int damping_steps_remaining_;  // Post-reset damping countdown
+    uint32_t nan_reset_count_;     // Count of resets due to NaN detection
 };
 
 #endif /* CONTROL_BALANCER_EKF_H */
