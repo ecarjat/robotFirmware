@@ -15,6 +15,16 @@
         "/Users/emmanuelcarjat/git/robot2Wheel/stm32Controller/firmware"
       ],
       "env": {}
+    },
+    "gitea-mcp-server": {
+      "type": "stdio",
+      "command": "gitea-mcp-server",
+      "args": [
+        "-t", "stdio",
+        "--host", "http://git.home:3001/",
+        "--token", "26c4ae625d1bd9b248755cb22a87de51f2849184"
+      ],
+      "env": {}
     }
   }
 }
