@@ -243,6 +243,7 @@ void log_writer_tick(void) {
 
   log_meta_tick(async_state);
   if (s_meta_op_inflight != LOG_META_OP_NONE) {
+    /* Meta saves block the writer; queued records may drop if the queue fills. */
     return;
   }
 
