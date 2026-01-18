@@ -55,7 +55,8 @@ void BalancerEKF::partialReset(float theta_init, float pos_init)
     ekf_.P[0 * EKF_N + 0] = EKF_P0_THETA;
     ekf_.P[1 * EKF_N + 1] = EKF_P0_THETA_DOT;
     ekf_.P[2 * EKF_N + 2] = EKF_P0_X;
-    // Keep P[3][3] and P[4][4] unchanged (velocity and bias covariance)
+    ekf_.P[4 * EKF_N + 4] = EKF_P0_BIAS;  // Inflate bias covariance after reset
+    // Keep P[3][3] unchanged (velocity covariance)
 
     // Clear cross-covariances involving reset states to avoid inconsistency.
     const int reset_states[] = {0, 1, 2};
