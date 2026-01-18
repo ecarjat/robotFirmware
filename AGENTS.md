@@ -39,6 +39,7 @@ Purpose: onboard coding agents quickly and safely for this firmware repo.
 - Implement the fix on that branch only.
 - Open a PR from the branch and reference the issue in the PR (e.g., `Closes #XX`).
 - Keep main clean; only merge via PR.
+- Issue comments often include the intended fix; read them before coding.
 
 ## Gitea repository
 Main repo:
