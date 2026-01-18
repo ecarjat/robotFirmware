@@ -157,6 +157,10 @@ void log_push_record(const LogRecord *rec) {
   if (!s_initialized || rec == NULL) {
     return;
   }
+  /* Pause logging during dumps to avoid ring overwrite. */
+  if (log_is_dumping()) {
+    return;
+  }
 
   /*
    * SPSC Producer: Only this function writes s_queue_head.
