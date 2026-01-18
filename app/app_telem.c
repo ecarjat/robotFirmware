@@ -19,10 +19,33 @@
 
 static uint32_t s_last_telem_ms = 0U;
 static uint32_t s_telem_fail_count = 0U;
+static uint32_t s_telem_next_send_ms = 0U;
+
+#define TELEM_BACKOFF_BASE_MS 200U
+#define TELEM_BACKOFF_MAX_MS 2000U
+#define TELEM_RESTART_THRESHOLD 5U
 
 void app_telem_init(void) {
   s_last_telem_ms = HAL_GetTick();
   s_telem_fail_count = 0U;
+  s_telem_next_send_ms = 0U;
+}
+
+static uint32_t telem_next_backoff(uint32_t fail_count) {
+  uint32_t backoff = TELEM_BACKOFF_BASE_MS;
+  uint32_t steps = (fail_count > 0U) ? (fail_count - 1U) : 0U;
+  while (steps > 0U && backoff < TELEM_BACKOFF_MAX_MS) {
+    if (backoff > (TELEM_BACKOFF_MAX_MS / 2U)) {
+      backoff = TELEM_BACKOFF_MAX_MS;
+      break;
+    }
+    backoff *= 2U;
+    steps--;
+  }
+  if (backoff > TELEM_BACKOFF_MAX_MS) {
+    backoff = TELEM_BACKOFF_MAX_MS;
+  }
+  return backoff;
 }
 
 static void app_send_telem(void) {
@@ -123,8 +146,15 @@ static void app_send_telem(void) {
 
     if (last_err != APP_LINK_SEND_ERR_UART_BUSY) {
       s_telem_fail_count++;
+      uint32_t backoff_ms = telem_next_backoff(s_telem_fail_count);
+      s_telem_next_send_ms = telem.timestamp_ms + backoff_ms;
       if (s_telem_fail_count >= TELEM_FAIL_THRESHOLD) {
         led_status_set_flag(LED_STATUS_TELEM_FAILURE);
+      }
+      if (s_telem_fail_count == TELEM_RESTART_THRESHOLD) {
+        APP_LOG_WARN("Telem failures reached %lu; restarting link",
+                     (unsigned long)s_telem_fail_count);
+        app_link_start();
       }
       unsigned long cts =
           (unsigned long)(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET);
@@ -141,6 +171,7 @@ static void app_send_telem(void) {
     /* Success: clear failure counter and LED flag */
     if (s_telem_fail_count > 0U) {
       s_telem_fail_count = 0U;
+      s_telem_next_send_ms = 0U;
       led_status_clear_flag(LED_STATUS_TELEM_FAILURE);
       APP_LOG_INFO("Telem send recovered; clearing telem failure flag");
     }
@@ -149,7 +180,11 @@ static void app_send_telem(void) {
 
 void app_telem_tick(uint32_t now_ms) {
   if ((now_ms - s_last_telem_ms) >= APP_TELEM_PERIOD_MS) {
-    app_send_telem();
     s_last_telem_ms = now_ms;
+    if (s_telem_next_send_ms != 0U &&
+        (int32_t)(now_ms - s_telem_next_send_ms) < 0) {
+      return;
+    }
+    app_send_telem();
   }
 }
