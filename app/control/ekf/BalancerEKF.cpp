@@ -8,6 +8,7 @@ constexpr float MAX_DT = EKF_MAX_DT;  // guard against large time steps
 constexpr int POST_RESET_DAMPING_STEPS = 10;  // Steps to apply extra damping after reset
 constexpr float DAMPING_R_MULTIPLIER = 5.0f;  // Inflate measurement variance during damping
 constexpr float INNOV_GATE_R_MULTIPLIER = 100.0f;  // Inflate R when gating instead of resetting
+constexpr float MAX_R_INFLATION = 100.0f;  // Cap combined inflation to preserve observability
 }  // namespace
 
 BalancerEKF::BalancerEKF()
@@ -269,19 +270,26 @@ bool BalancerEKF::step(float thetaAcc, float vEnc, float posEnc,
         return false;
     }
 
-    float measurement_var = isnan(thetaMeasVar) ? R_[0] : thetaMeasVar;
+    float base_measurement_var = isnan(thetaMeasVar) ? R_[0] : thetaMeasVar;
+    float r_inflation = 1.0f;
 
     // Apply innovation gating for theta: inflate R instead of resetting
     // This allows smoother recovery from transient disturbances
     if (bad_theta) {
-        measurement_var *= INNOV_GATE_R_MULTIPLIER;
+        r_inflation *= INNOV_GATE_R_MULTIPLIER;
     }
 
     // Apply post-reset damping: inflate measurement variance to reduce correction magnitude
     if (damping_steps_remaining_ > 0) {
-        measurement_var *= DAMPING_R_MULTIPLIER;
+        r_inflation *= DAMPING_R_MULTIPLIER;
         damping_steps_remaining_--;
     }
+
+    if (r_inflation > MAX_R_INFLATION) {
+        r_inflation = MAX_R_INFLATION;
+    }
+
+    float measurement_var = base_measurement_var * r_inflation;
 
     float R_step[EKF_M * EKF_M];
     memcpy(R_step, R_, sizeof(R_step));
