@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "app_config.h"
+#include "app_utils.h"
 #include "bmm150.h"
 #include "imu_bmm150_config.h"
 #include "imu_bus.h"
@@ -46,6 +47,8 @@ static BMM150_INTF_RET_TYPE bmm_spi_write(uint8_t reg_addr,
                                           const uint8_t *reg_data,
                                           uint32_t len,
                                           void *intf_ptr);
+static bool bmm_init_context_ok(void);
+static bool bmm_delay_ms(uint32_t delay_ms);
 static void bmm_delay_us(uint32_t period, void *intf_ptr);
 static void bmm_store_sample(const imu_bmm150_sample_t *sample);
 static bool bmm_parse_sample(const uint8_t *data, imu_bmm150_sample_t *sample);
@@ -103,6 +106,41 @@ static BMM150_INTF_RET_TYPE bmm_spi_write(uint8_t reg_addr,
     return BMM150_OK;
 }
 
+/* IMU init uses SysTick-based delays and must not run in ISR context. */
+static bool bmm_init_context_ok(void)
+{
+    if (app_in_isr())
+    {
+        APP_LOG_ERROR("BMM150 init called from ISR");
+        return false;
+    }
+    if ((SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) == 0U ||
+        (SysTick->CTRL & SysTick_CTRL_TICKINT_Msk) == 0U)
+    {
+        APP_LOG_ERROR("BMM150 init requires SysTick");
+        return false;
+    }
+    return true;
+}
+
+static bool bmm_delay_ms(uint32_t delay_ms)
+{
+    if (delay_ms == 0U)
+    {
+        return true;
+    }
+    if (!bmm_init_context_ok())
+    {
+        return false;
+    }
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < delay_ms)
+    {
+        __NOP();
+    }
+    return true;
+}
+
 static void bmm_delay_us(uint32_t period, void *intf_ptr)
 {
     (void)intf_ptr;
@@ -111,7 +149,7 @@ static void bmm_delay_us(uint32_t period, void *intf_ptr)
         return;
     }
     uint32_t ms = (period + 999U) / 1000U;
-    HAL_Delay(ms);
+    (void)bmm_delay_ms(ms);
 }
 
 static void bmm_store_sample(const imu_bmm150_sample_t *sample)
@@ -209,6 +247,11 @@ static bool bmm_start_dma_read(void)
 
 bool imu_bmm150_init(void)
 {
+    if (!bmm_init_context_ok())
+    {
+        return false;
+    }
+
     memset(&s_bmm, 0, sizeof(s_bmm));
     memset(&s_bmm_spi, 0, sizeof(s_bmm_spi));
 
@@ -280,7 +323,10 @@ bool imu_bmm150_init(void)
     }
 
     /* Wait for first measurement to complete (REGULAR preset = 10Hz ODR = 100ms) */
-    HAL_Delay(120);
+    if (!bmm_delay_ms(120U))
+    {
+        return false;
+    }
 
     s_init_ok = 1U;
     s_dma_inflight = 0U;

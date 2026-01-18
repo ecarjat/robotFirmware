@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "app_config.h"
+#include "app_utils.h"
 #include "imu_icm42688_config.h"
 #include "imu_bus.h"
 #include "imu_sched.h"
@@ -51,6 +52,8 @@ static uint8_t s_data_rx[ICM42688_DATA_FRAME_LEN] __attribute__((section(".bdma_
 static int icm_spi_read(uint8_t reg, uint8_t *buf, uint32_t len);
 static int icm_spi_write(uint8_t reg, const uint8_t *buf, uint32_t len);
 static int icm_set_bank(uint8_t bank);
+static bool icm_init_context_ok(void);
+static bool icm_delay_ms(uint32_t delay_ms);
 static void icm_store_sample(const imu_icm42688_sample_t *sample);
 static void icm_parse_sample(const uint8_t *data, imu_icm42688_sample_t *sample);
 static void icm_dma_done(void *ctx, int status);
@@ -110,6 +113,41 @@ static int icm_set_bank(uint8_t bank)
     return icm_spi_write(ICM42688_REG_BANK_SEL, &bank, 1U);
 }
 
+/* IMU init uses SysTick-based delays and must not run in ISR context. */
+static bool icm_init_context_ok(void)
+{
+    if (app_in_isr())
+    {
+        APP_LOG_ERROR("ICM42688 init called from ISR");
+        return false;
+    }
+    if ((SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) == 0U ||
+        (SysTick->CTRL & SysTick_CTRL_TICKINT_Msk) == 0U)
+    {
+        APP_LOG_ERROR("ICM42688 init requires SysTick");
+        return false;
+    }
+    return true;
+}
+
+static bool icm_delay_ms(uint32_t delay_ms)
+{
+    if (delay_ms == 0U)
+    {
+        return true;
+    }
+    if (!icm_init_context_ok())
+    {
+        return false;
+    }
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < delay_ms)
+    {
+        __NOP();
+    }
+    return true;
+}
+
 static int icm_soft_reset(void)
 {
     uint8_t val = 0x01U;
@@ -121,7 +159,10 @@ static int icm_soft_reset(void)
     {
         return -1;
     }
-    HAL_Delay(1);
+    if (!icm_delay_ms(1U))
+    {
+        return -1;
+    }
     return 0;
 }
 
@@ -224,6 +265,11 @@ static bool icm_start_dma_read(void)
 
 bool imu_icm42688_init(void)
 {
+    if (!icm_init_context_ok())
+    {
+        return false;
+    }
+
     memset(&s_icm_spi, 0, sizeof(s_icm_spi));
 
     (void)spi_bus_init(&hspi6);
