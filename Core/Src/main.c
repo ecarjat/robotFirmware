@@ -29,6 +29,7 @@
 #include "log.h"
 #include "app_config.h"
 #include "system_reboot.h"
+#include "param_storage.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -234,6 +235,23 @@ int main(void)
                    (unsigned long)fault.pc,
                    (unsigned long)fault.psr,
                    (unsigned long)fault.sp);
+    uint8_t fault_in_param = 0U;
+    if (fault.bfar >= PARAM_FLASH_BASE && fault.bfar < PARAM_FLASH_END) {
+      fault_in_param = 1U;
+    }
+    if (fault.mmfar >= PARAM_FLASH_BASE && fault.mmfar < PARAM_FLASH_END) {
+      fault_in_param = 1U;
+    }
+    if (fault_in_param != 0U && (fault.cfsr & 0x0000FF00U) != 0U) {
+      app_log_printf("[WDOG] Param flash fault; erasing param sector\r\n");
+      int erase_rc = param_storage_erase();
+      if (erase_rc == PARAM_OK) {
+        app_log_printf("[WDOG] Param flash erase OK\r\n");
+      } else {
+        app_log_printf("[WDOG] Param flash erase FAILED (%d)\r\n", erase_rc);
+      }
+      app_log_flush_blocking(50U);
+    }
   }
 
   /*
