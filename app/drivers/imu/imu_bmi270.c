@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "app_config.h"
+#include "app_utils.h"
 #include "bmi270.h"
 #include "bmi2.h"
 #include "bmi2_defs.h"
@@ -48,6 +49,8 @@ static BMI2_INTF_RETURN_TYPE bmi_spi_write(uint8_t reg_addr,
                                            const uint8_t *reg_data,
                                            uint32_t len,
                                            void *intf_ptr);
+static bool bmi_init_context_ok(void);
+static bool bmi_delay_ms(uint32_t delay_ms);
 static void bmi_delay_us(uint32_t period, void *intf_ptr);
 static void bmi_store_sample(const imu_bmi270_sample_t *sample);
 static void bmi_parse_sample(const uint8_t *data, imu_bmi270_sample_t *sample);
@@ -105,6 +108,41 @@ static BMI2_INTF_RETURN_TYPE bmi_spi_write(uint8_t reg_addr,
     return BMI2_OK;
 }
 
+/* IMU init uses SysTick-based delays and must not run in ISR context. */
+static bool bmi_init_context_ok(void)
+{
+    if (app_in_isr())
+    {
+        APP_LOG_ERROR("BMI270 init called from ISR");
+        return false;
+    }
+    if ((SysTick->CTRL & SysTick_CTRL_ENABLE_Msk) == 0U ||
+        (SysTick->CTRL & SysTick_CTRL_TICKINT_Msk) == 0U)
+    {
+        APP_LOG_ERROR("BMI270 init requires SysTick");
+        return false;
+    }
+    return true;
+}
+
+static bool bmi_delay_ms(uint32_t delay_ms)
+{
+    if (delay_ms == 0U)
+    {
+        return true;
+    }
+    if (!bmi_init_context_ok())
+    {
+        return false;
+    }
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < delay_ms)
+    {
+        __NOP();
+    }
+    return true;
+}
+
 static void bmi_delay_us(uint32_t period, void *intf_ptr)
 {
     (void)intf_ptr;
@@ -113,7 +151,7 @@ static void bmi_delay_us(uint32_t period, void *intf_ptr)
         return;
     }
     uint32_t ms = (period + 999U) / 1000U;
-    HAL_Delay(ms);
+    (void)bmi_delay_ms(ms);
 }
 
 static void bmi_store_sample(const imu_bmi270_sample_t *sample)
@@ -205,6 +243,11 @@ static bool bmi_start_dma_read(void)
 
 bool imu_bmi270_init(void)
 {
+    if (!bmi_init_context_ok())
+    {
+        return false;
+    }
+
     memset(&s_bmi, 0, sizeof(s_bmi));
     memset(&s_bmi_spi, 0, sizeof(s_bmi_spi));
 
