@@ -54,6 +54,23 @@ static uint32_t s_wdog_tick = 0U;
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void debug_wdog_capture_fault(void)
+{
+  uint32_t sp = __get_MSP();
+  uint32_t *stack = (uint32_t *)sp;
+  uint32_t lr = stack[5];
+  uint32_t pc = stack[6];
+  uint32_t psr = stack[7];
+
+  debug_wdog_record_fault(SCB->HFSR,
+                          SCB->CFSR,
+                          SCB->BFAR,
+                          SCB->MMFAR,
+                          lr,
+                          pc,
+                          psr,
+                          sp);
+}
 
 /* USER CODE END 0 */
 
@@ -111,20 +128,7 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-  uint32_t sp = __get_MSP();
-  uint32_t *stack = (uint32_t *)sp;
-  uint32_t lr = stack[5];
-  uint32_t pc = stack[6];
-  uint32_t psr = stack[7];
-
-  debug_wdog_record_fault(SCB->HFSR,
-                          SCB->CFSR,
-                          SCB->BFAR,
-                          SCB->MMFAR,
-                          lr,
-                          pc,
-                          psr,
-                          sp);
+  debug_wdog_capture_fault();
   for (;;) {
     __NOP();
   }
@@ -143,6 +147,7 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
+  debug_wdog_capture_fault();
 
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
@@ -158,6 +163,7 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
+  debug_wdog_capture_fault();
 
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
@@ -173,6 +179,7 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
+  debug_wdog_capture_fault();
 
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)

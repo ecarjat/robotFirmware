@@ -19,6 +19,7 @@
 #define BKPSRAM_BASE_ADDR  0x38800000UL
 #define WDOG_MAGIC_VALUE   0xDEADBEEFUL
 #define WDOG_FAULT_MAGIC   0xB16B00B5UL
+#define WDOG_DCACHE_LINE_SIZE 32U
 
 typedef struct {
     uint32_t magic;
@@ -45,6 +46,38 @@ static uint16_t s_last_checkpoint_id = 0;
 static uint16_t s_last_checkpoint_line = 0;
 static bool s_ready = false;
 
+static void debug_wdog_cache_invalidate(void)
+{
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+    if ((SCB->CCR & SCB_CCR_DC_Msk) == 0U)
+    {
+        return;
+    }
+    uintptr_t start = ((uintptr_t)WDOG_BACKUP) & ~(uintptr_t)(WDOG_DCACHE_LINE_SIZE - 1U);
+    uintptr_t end = (uintptr_t)WDOG_BACKUP + sizeof(*WDOG_BACKUP);
+    if (end > start)
+    {
+        SCB_InvalidateDCache_by_Addr((uint32_t *)start, (int32_t)(end - start));
+    }
+#endif
+}
+
+static void debug_wdog_cache_clean(void)
+{
+#if defined(__DCACHE_PRESENT) && (__DCACHE_PRESENT == 1U)
+    if ((SCB->CCR & SCB_CCR_DC_Msk) == 0U)
+    {
+        return;
+    }
+    uintptr_t start = ((uintptr_t)WDOG_BACKUP) & ~(uintptr_t)(WDOG_DCACHE_LINE_SIZE - 1U);
+    uintptr_t end = (uintptr_t)WDOG_BACKUP + sizeof(*WDOG_BACKUP);
+    if (end > start)
+    {
+        SCB_CleanDCache_by_Addr((uint32_t *)start, (int32_t)(end - start));
+    }
+#endif
+}
+
 /**
  * @brief Enable access to Backup SRAM
  *
@@ -69,6 +102,7 @@ void debug_wdog_init(void)
 {
     /* Enable backup SRAM access */
     backup_sram_enable();
+    debug_wdog_cache_invalidate();
 
     /* Check if last reset was due to IWDG */
     if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDG1RST))
@@ -91,6 +125,7 @@ void debug_wdog_init(void)
     WDOG_BACKUP->checkpoint_id = 0;
     WDOG_BACKUP->line = 0;
     WDOG_BACKUP->count = 0;
+    debug_wdog_cache_clean();
     s_ready = true;
 }
 
@@ -100,6 +135,7 @@ void debug_wdog_checkpoint(uint16_t checkpoint_id, uint16_t line)
     WDOG_BACKUP->checkpoint_id = checkpoint_id;
     WDOG_BACKUP->line = line;
     WDOG_BACKUP->count++;
+    debug_wdog_cache_clean();
 
     /*
      * Refresh watchdog at each checkpoint to extend timeout.
@@ -163,6 +199,8 @@ const char* debug_wdog_checkpoint_name(uint16_t checkpoint_id)
         case WDOG_CP_LINK_START:         return "LINK_START";
         case WDOG_CP_APP_INIT_DONE:      return "APP_INIT_DONE";
         case WDOG_CP_IDLE_LOOP:          return "IDLE_LOOP";
+        case WDOG_CP_PARAM_SCAN_START:   return "PARAM_SCAN_START";
+        case WDOG_CP_PARAM_SCAN_DONE:    return "PARAM_SCAN_DONE";
         case WDOG_CP_SCHED_TICK:         return "SCHEDULER TICK";
         case WDOG_CP_ERROR_HANDLER:      return "ERROR_HANDLER";
         default:                         return "UNKNOWN";
@@ -191,6 +229,7 @@ void debug_wdog_record_fault(uint32_t hfsr,
     WDOG_BACKUP->fault_pc = pc;
     WDOG_BACKUP->fault_psr = psr;
     WDOG_BACKUP->fault_sp = sp;
+    debug_wdog_cache_clean();
 }
 
 bool debug_wdog_get_fault(debug_wdog_fault_t *fault)

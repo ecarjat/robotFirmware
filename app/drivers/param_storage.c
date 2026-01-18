@@ -317,6 +317,7 @@ static bool param_validate_record(uint32_t address, param_header_t *header_out,
  */
 static void param_scan_sector(void)
 {
+    WDOG_CHECKPOINT(WDOG_CP_PARAM_SCAN_START);
     s_param.next_write_addr = PARAM_FLASH_BASE;
     s_param.current_sequence = 0U;
     s_param.record_count = 0U;
@@ -324,8 +325,10 @@ static void param_scan_sector(void)
 
     uint32_t addr = PARAM_FLASH_BASE;
 
-    while (addr + PARAM_HEADER_SIZE <= PARAM_FLASH_END)
+    while (addr + PARAM_FLASHWORD_SIZE <= PARAM_FLASH_END)
     {
+        debug_wdog_refresh();
+
         if (param_region_erased(addr, PARAM_FLASHWORD_SIZE))
         {
             /* Found first erased slot */
@@ -371,10 +374,11 @@ static void param_scan_sector(void)
     }
 
     /* If we reached the end, sector is full */
-    if (addr + PARAM_HEADER_SIZE > PARAM_FLASH_END)
+    if (addr + PARAM_FLASHWORD_SIZE > PARAM_FLASH_END)
     {
         s_param.next_write_addr = PARAM_FLASH_END;
     }
+    WDOG_CHECKPOINT(WDOG_CP_PARAM_SCAN_DONE);
 }
 
 int param_storage_init(void)
