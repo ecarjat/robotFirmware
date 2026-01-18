@@ -57,6 +57,19 @@ void BalancerEKF::partialReset(float theta_init, float pos_init)
     ekf_.P[2 * EKF_N + 2] = EKF_P0_X;
     // Keep P[3][3] and P[4][4] unchanged (velocity and bias covariance)
 
+    // Clear cross-covariances involving reset states to avoid inconsistency.
+    const int reset_states[] = {0, 1, 2};
+    for (int idx = 0; idx < (int)(sizeof(reset_states) / sizeof(reset_states[0])); ++idx) {
+        int i = reset_states[idx];
+        for (int j = 0; j < EKF_N; ++j) {
+            if (j == i) {
+                continue;
+            }
+            ekf_.P[i * EKF_N + j] = 0.0f;
+            ekf_.P[j * EKF_N + i] = 0.0f;
+        }
+    }
+
     // Start post-reset damping period
     damping_steps_remaining_ = POST_RESET_DAMPING_STEPS;
 }
