@@ -108,6 +108,10 @@ static led_pattern_t led_get_red_pattern(void)
         return LED_PATTERN_FAST;         /* Fast blink for motor timeout */
     }
 
+    if (s_status_flags & LED_STATUS_LOGGING_FAILURE) {
+        return LED_PATTERN_DOUBLE_FLASH; /* Double flash for logging/QSPI errors */
+    }
+
     if (s_status_flags & LED_STATUS_MOTOR_SATURATED) {
         return LED_PATTERN_SLOW;         /* Slow blink for saturation */
     }
