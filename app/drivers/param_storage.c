@@ -371,7 +371,7 @@ static void param_scan_sector(void)
     }
 
     /* If we reached the end, sector is full */
-    if (addr + record_size > PARAM_FLASH_END)
+    if (addr + PARAM_HEADER_SIZE > PARAM_FLASH_END)
     {
         s_param.next_write_addr = PARAM_FLASH_END;
     }
