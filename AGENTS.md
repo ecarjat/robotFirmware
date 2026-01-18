@@ -33,3 +33,19 @@ Purpose: onboard coding agents quickly and safely for this firmware repo.
 - Favor existing patterns in surrounding code (C-style in `app/`, minimal C++ in control).
 - Use `rg` for searching; avoid large refactors without confirming with the user.
 - Keep changes scoped; avoid touching CubeMX-generated files unless necessary.
+
+## Workflow (Issue Fixes)
+- Create a new branch for each issue (e.g., `fix/issue-XX-short-title`).
+- Implement the fix on that branch only.
+- Open a PR from the branch and reference the issue in the PR (e.g., `Closes #XX`).
+- Keep main clean; only merge via PR.
+
+## Gitea repository
+Main repo:
+ecarjat/robotFirmware
+
+Common repo:
+ecarjat/robotCommon
+
+esp32-arduino repo
+ecarjat/robotESP32-Arduino
