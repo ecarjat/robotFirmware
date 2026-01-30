@@ -81,6 +81,14 @@
 			"group": "build",
 			"problemMatcher": [],
 			"detail": "CMake template build task"
+		},
+		{
+			"type": "cmake",
+			"label": "CMake: test",
+			"command": "test",
+			"preset": "__defaultTestPreset__",
+			"problemMatcher": [],
+			"detail": "CMake template test task"
 		}
 	],
 	"inputs": [

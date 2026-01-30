@@ -15,7 +15,8 @@ Purpose: onboard coding agents quickly and safely for this firmware repo.
   ```bash
   PATH="/Users/emmanuelcarjat/.vscode/extensions/stmicroelectronics.stm32cube-ide-core-1.1.0/resources/binaries/darwin/aarch64:/Users/emmanuelcarjat/.vscode/extensions/stmicroelectronics.stm32cube-ide-build-cmake-1.43.0/resources/cube-cmake/darwin:$PATH" /Users/emmanuelcarjat/.vscode/extensions/stmicroelectronics.stm32cube-ide-build-cmake-1.43.0/resources/cube-cmake/darwin/cube-cmake --build /Users/emmanuelcarjat/git/robot2Wheel/stm32Controller/firmware/build/Debug --target all --
   ```
-- No unit test runner is wired up in this repo. If you add tests, document how to run them.
+- Host-unit tests are wired up under `tests/` using Catch2 + CMake/CTest.
+- Build + run tests (host): `cmake --build tests/build` then `ctest --test-dir tests/build -V`.
 
 ## DMA and cache rules (H7)
 - DMA buffers must live in `.dma_buffer` (RAM_D1). Do not place DMA TX/RX buffers in `.bss`/DTCMRAM.
@@ -33,6 +34,16 @@ Purpose: onboard coding agents quickly and safely for this firmware repo.
 - Favor existing patterns in surrounding code (C-style in `app/`, minimal C++ in control).
 - Use `rg` for searching; avoid large refactors without confirming with the user.
 - Keep changes scoped; avoid touching CubeMX-generated files unless necessary.
+
+## Tests (host/unit)
+- Place unit tests in `tests/` and register them in `tests/CMakeLists.txt`.
+- Prefer link-time fakes over stub headers:
+  - Keep production headers in includes.
+  - Provide fake implementations in `tests/fakes/*.c/.cpp` for the small set of symbols needed.
+- Avoid including `app_config.h` in unit-tested modules when a narrower include is sufficient.
+  - Use `app/utils/app_log_macros.h` for logging macros instead of pulling HAL headers.
+- If a module depends on HAL or MCU registers, isolate those dependencies behind a tiny wrapper or interface before writing tests.
+- Always add a test task that rebuilds before running CTest (see `tests/.vscode/tasks.json`).
 
 ## Workflow (Issue Fixes)
 - Create a new branch for each issue (e.g., `fix/issue-XX-short-title`).

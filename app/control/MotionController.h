@@ -77,6 +77,29 @@ public:
 
     void resetPidState();
 
+#ifdef UNIT_TEST
+    float test_computePid(float setpoint,
+                          float measurement,
+                          float dt,
+                          float Kp, float Ki, float Kd,
+                          float outputLimit,
+                          float integralLimit)
+    {
+        return computePid(_velocityPid, setpoint, measurement, dt,
+                          Kp, Ki, Kd, outputLimit, integralLimit);
+    }
+
+    ControlOutput test_applyVelocitySlew(ControlOutput desired, float dt)
+    {
+        return applyVelocitySlew(desired, dt);
+    }
+
+    float test_computeLqrUSum(const StateEstimate& state, float vRef, float thetaRef)
+    {
+        return computeLqrUSum(state, vRef, thetaRef);
+    }
+#endif
+
 private:
     struct PidState {
         float integral = 0.0f;

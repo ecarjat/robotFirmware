@@ -4,8 +4,7 @@
 #include "StateEstimator.h"
 #include "config_control.h"
 #include "types.h"
-#include "log.h"
-#include "app_config.h"
+#include "app_log_macros.h"
 
 #include <math.h>
 #include <string.h>
@@ -13,7 +12,7 @@
 #include "app_main.h"
 #include "motor_link.h"
 #include "sensors.h"
-#include "stm32h7xx_hal.h"
+/* stm32h7xx_hal.h not required for host tests */
 #if SENSOR_ENABLE_BMI270
 #include "imu_bmi270.h"
 #endif
@@ -52,6 +51,13 @@ constexpr float kBmiGyroScale = (kBmiGyroRangeDps * kDegToRad) / 32768.0f;
 constexpr float kIcmAccelScale = (kIcmAccelRangeG * kGravity) / 32768.0f;
 constexpr float kIcmGyroScale = (kIcmGyroRangeDps * kDegToRad) / 32768.0f;
 }
+
+#ifdef UNIT_TEST
+static bool s_test_estimate_override = false;
+static motion_control_estimate_t s_test_estimate = {};
+static bool s_test_imu_health_override = false;
+static motion_control_imu_health_t s_test_imu_health = {};
+#endif
 
 static uint32_t s_last_tick_ms = 0U;
 static float s_max_turn_rate = PARAM_MAX_TURN_RATE;
@@ -329,6 +335,17 @@ bool motion_control_can_arm(void)
     }
 
     StateEstimate estimate = s_estimator.getEstimate();
+#ifdef UNIT_TEST
+    if (s_test_estimate_override)
+    {
+        estimate.theta = s_test_estimate.theta_rad;
+        estimate.thetaDot = s_test_estimate.theta_dot;
+        estimate.x = s_test_estimate.x_m;
+        estimate.xDot = s_test_estimate.x_dot_mps;
+        estimate.gyroBias = s_test_estimate.gyro_bias;
+        estimate.valid = s_test_estimate.valid != 0U;
+    }
+#endif
     if (!estimate.valid)
     {
         APP_LOG_ERROR("Arm rejected: estimate invalid");
@@ -680,6 +697,13 @@ bool motion_control_get_imu_health(motion_control_imu_health_t *out)
     {
         return false;
     }
+#ifdef UNIT_TEST
+    if (s_test_imu_health_override)
+    {
+        *out = s_test_imu_health;
+        return true;
+    }
+#endif
     ImuHealthMetrics metrics{};
     if (!s_estimator.getImuHealthMetrics(metrics))
     {
@@ -738,6 +762,36 @@ bool motion_control_get_estimate(motion_control_estimate_t *out)
     out->valid = est.valid ? 1U : 0U;
     return true;
 }
+
+#ifdef UNIT_TEST
+void motion_control_test_set_estimate(const motion_control_estimate_t *est)
+{
+    if (est == NULL)
+    {
+        s_test_estimate_override = false;
+        return;
+    }
+    s_test_estimate = *est;
+    s_test_estimate_override = true;
+}
+
+void motion_control_test_set_imu_health(const motion_control_imu_health_t *health)
+{
+    if (health == NULL)
+    {
+        s_test_imu_health_override = false;
+        return;
+    }
+    s_test_imu_health = *health;
+    s_test_imu_health_override = true;
+}
+
+void motion_control_test_clear_overrides(void)
+{
+    s_test_estimate_override = false;
+    s_test_imu_health_override = false;
+}
+#endif
 
 bool motion_control_get_control_output(motion_control_output_t *out)
 {

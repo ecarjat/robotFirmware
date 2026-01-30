@@ -1,21 +1,35 @@
 #include "control_timer.h"
 #include "config_control.h"
+#include "app_log_macros.h"
 #include "stm32h7xx_hal.h"
 #include "stm32h7xx_hal_tim.h"
 #include "stm32h7xx_ll_rcc.h"
+#include <stddef.h>
 
 /* DWT cycle counter for high-resolution timing */
+#ifdef CONTROL_TIMER_TEST
+extern volatile uint32_t test_dwt_ctrl;
+extern volatile uint32_t test_dwt_cyccnt;
+extern volatile uint32_t test_coredebug_demcr;
+#define DWT_CTRL    test_dwt_ctrl
+#define DWT_CYCCNT  test_dwt_cyccnt
+#define CoreDebug_DEMCR test_coredebug_demcr
+#else
 #define DWT_CTRL    (*(volatile uint32_t *)0xE0001000)
 #define DWT_CYCCNT  (*(volatile uint32_t *)0xE0001004)
+#define CoreDebug_DEMCR (*(volatile uint32_t *)0xE000EDFC)
+#endif
 #define DWT_CTRL_CYCCNTENA (1UL << 0)
 
 /* CoreDebug registers for DWT enable */
-#define CoreDebug_DEMCR (*(volatile uint32_t *)0xE000EDFC)
 #define CoreDebug_DEMCR_TRCENA (1UL << 24)
 
 /* External timer handle from main.c */
+#ifndef CONTROL_TIMER_TEST
 #include "app_config.h"
+#else
 extern TIM_HandleTypeDef htim2;
+#endif
 
 /* Default control period in microseconds */
 #define CONTROL_PERIOD_DEFAULT_US ((uint32_t)(1000000.0f / CONTROL_DEFAULT_HZ + 0.5f))

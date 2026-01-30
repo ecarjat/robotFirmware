@@ -99,6 +99,12 @@ void motion_control_set_inner_mode(uint8_t mode);
  */
 uint8_t motion_control_get_inner_mode(void);
 
+#ifdef UNIT_TEST
+void motion_control_test_set_estimate(const motion_control_estimate_t *est);
+void motion_control_test_set_imu_health(const motion_control_imu_health_t *health);
+void motion_control_test_clear_overrides(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

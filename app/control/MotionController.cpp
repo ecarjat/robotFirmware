@@ -1,5 +1,5 @@
 #include "MotionController.h"
-#include "app_config.h"
+#include "app_log_macros.h"
 #include "config_control.h"
 
 #include <math.h>

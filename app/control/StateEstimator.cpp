@@ -436,3 +436,25 @@ float StateEstimator::getEstimatedYawRate() const
     // Return gyro yaw rate minus estimated bias
     return ekf_log_data_.gyro_z - estimate_.yawBias;
 }
+
+#ifdef UNIT_TEST
+void state_estimator_test_set_identity(float rot[9])
+{
+    set_identity(rot);
+}
+
+void state_estimator_test_apply_rotation(const float rot[9], const float in[3], float out[3])
+{
+    apply_rotation(rot, in, out);
+}
+
+float state_estimator_test_vec_norm(const float v[3])
+{
+    return vec_norm(v);
+}
+
+float state_estimator_test_vec_dot(const float a[3], const float b[3])
+{
+    return vec_dot(a, b);
+}
+#endif

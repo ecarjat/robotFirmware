@@ -1,0 +1,36 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "tests-debug",
+      "displayName": "Host Tests (Debug)",
+      "description": "Host-side Catch2 tests",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "USE_FETCHCONTENT_CATCH2": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "tests-debug",
+      "configurePreset": "tests-debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "tests-debug",
+      "configurePreset": "tests-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

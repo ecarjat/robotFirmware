@@ -3,10 +3,10 @@
 #include <math.h>
 
 #include "config_control.h"
-#include "app_config.h"
+#include "app_log_macros.h"
 
 extern "C" {
-#include "../app/logging/blackbox_dump.h"
+#include "blackbox_dump.h"
 #include "param_storage.h"
 }
 

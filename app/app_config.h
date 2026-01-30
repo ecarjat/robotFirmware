@@ -2,6 +2,7 @@
 #define STM32_APP_CONFIG_H
 
 #include "log.h"
+#include "app_log_macros.h"
 #include "main.h"
 #include "usb_device.h"
 
@@ -20,21 +21,6 @@
 #define APP_LOG_RING_BYTES 2048U
 #define APP_LOG_USB_CHUNK_BYTES 256U
 
-#define APP_LOG_LEVEL_OFF 0U
-#define APP_LOG_LEVEL_ERROR 1U
-#define APP_LOG_LEVEL_WARN 2U
-#define APP_LOG_LEVEL_INFO 3U
-#define APP_LOG_LEVEL_DEBUG 4U
-
-
-#ifndef APP_LOG_LEVEL
-#ifdef NDEBUG
-#define APP_LOG_LEVEL APP_LOG_LEVEL_WARN
-#else
-#define APP_LOG_LEVEL APP_LOG_LEVEL_INFO
-#endif
-#endif
-
 #ifndef DEBUG_FAULTS
 #define DEBUG_FAULTS 0
 #endif
@@ -43,6 +29,27 @@
 #define MOTOR_LINK_DEBUG 0
 #endif
 #define ENABLE_MOTORS
+
+#ifndef MOTOR_BACKEND_STEADYWIN_CAN
+#define MOTOR_BACKEND_STEADYWIN_CAN 1
+#endif
+
+#ifndef MOTOR_LINK_CAN_LEFT_ID
+#define MOTOR_LINK_CAN_LEFT_ID 0x01U
+#endif
+
+#ifndef MOTOR_LINK_CAN_RIGHT_ID
+#define MOTOR_LINK_CAN_RIGHT_ID 0x02U
+#endif
+
+#ifndef MOTOR_LINK_CAN_REQ_ID_PREFIX
+#define MOTOR_LINK_CAN_REQ_ID_PREFIX 0x100U
+#endif
+
+#ifndef MOTOR_LINK_CAN_REQ_ID
+#define MOTOR_LINK_CAN_REQ_ID(addr)                                            \
+  (MOTOR_LINK_CAN_REQ_ID_PREFIX | ((addr) & 0x7FFU))
+#endif
 
 #ifndef APP_ENABLE_PROFILING
 #define APP_ENABLE_PROFILING 1
@@ -57,61 +64,5 @@ extern CRC_HandleTypeDef hcrc;
 #define APP_MOTOR_LEFT_UART (&huart6)
 #define APP_MOTOR_RIGHT_UART (&huart1)
 
-
-#if APP_LOG_LEVEL >= APP_LOG_LEVEL_DEBUG
-#define APP_LOG_DEBUG(fmt, ...)                                                 \
-  app_log_printf("[APP][DEBUG] " fmt "\r\n", ##__VA_ARGS__)
-#else
-#define APP_LOG_DEBUG(fmt, ...)                                                 \
-  do                                                                           \
-  {                                                                            \
-    if (0)                                                                     \
-    {                                                                          \
-      app_log_printf(fmt, ##__VA_ARGS__);                                      \
-    }                                                                          \
-  } while (0)
-#endif
-
-#if APP_LOG_LEVEL >= APP_LOG_LEVEL_INFO
-#define APP_LOG_INFO(fmt, ...)                                                 \
-  app_log_printf("[APP][INFO] " fmt "\r\n", ##__VA_ARGS__)
-#else
-#define APP_LOG_INFO(fmt, ...)                                                 \
-  do                                                                           \
-  {                                                                            \
-    if (0)                                                                     \
-    {                                                                          \
-      app_log_printf(fmt, ##__VA_ARGS__);                                      \
-    }                                                                          \
-  } while (0)
-#endif
-
-#if APP_LOG_LEVEL >= APP_LOG_LEVEL_WARN
-#define APP_LOG_WARN(fmt, ...)                                                 \
-  app_log_printf("[APP][WARN] " fmt "\r\n", ##__VA_ARGS__)
-#else
-#define APP_LOG_WARN(fmt, ...)                                                 \
-  do                                                                           \
-  {                                                                            \
-    if (0)                                                                     \
-    {                                                                          \
-      app_log_printf(fmt, ##__VA_ARGS__);                                      \
-    }                                                                          \
-  } while (0)
-#endif
-
-#if APP_LOG_LEVEL >= APP_LOG_LEVEL_ERROR
-#define APP_LOG_ERROR(fmt, ...)                                                \
-  app_log_printf("[APP][ERROR] " fmt "\r\n", ##__VA_ARGS__)
-#else
-#define APP_LOG_ERROR(fmt, ...)                                                \
-  do                                                                           \
-  {                                                                            \
-    if (0)                                                                     \
-    {                                                                          \
-      app_log_printf(fmt, ##__VA_ARGS__);                                      \
-    }                                                                          \
-  } while (0)
-#endif
 
 #endif /* STM32_APP_CONFIG_H */

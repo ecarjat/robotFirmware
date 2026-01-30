@@ -122,4 +122,11 @@ private:
     uint32_t primary_healthy_since_ms_;
 };
 
+#ifdef UNIT_TEST
+void state_estimator_test_set_identity(float rot[9]);
+void state_estimator_test_apply_rotation(const float rot[9], const float in[3], float out[3]);
+float state_estimator_test_vec_norm(const float v[3]);
+float state_estimator_test_vec_dot(const float a[3], const float b[3]);
+#endif
+
 #endif /* CONTROL_STATE_ESTIMATOR_H */
