@@ -5,6 +5,10 @@
 #include "config_control.h"
 #include "types.h"
 #include "app_log_macros.h"
+#include "hip_control.h"
+#include "hip_behavior.h"
+#include "hip_kinematics.h"
+#include "lqr_lut.h"
 
 #include <math.h>
 #include <string.h>
@@ -65,10 +69,13 @@ static uint32_t s_last_imu_ok_ms = 0U;
 static uint32_t s_last_imu_irq_ms = 0U;
 static uint32_t s_last_motor_ok_ms = 0U;
 static float s_control_dt = CONTROL_DT;
+static uint32_t s_last_hip_coord_ms = 0U;
+static uint32_t s_last_lqr_lut_ms = 0U;
+static hip_behavior_mode_t s_hip_behavior_mode = HIP_BEHAVIOR_NORMAL;
 
 /* Last control output for telemetry */
-static float s_last_iq_left = 0.0f;
-static float s_last_iq_right = 0.0f;
+static float s_last_torque_left = 0.0f;
+static float s_last_torque_right = 0.0f;
 static bool s_output_enabled = true;
 static bool s_motor_disable_failed = false;
 
@@ -111,6 +118,9 @@ void motion_control_apply_params(void)
     motion_control_update_params();
     s_estimator.setImuRotations(g_robot_params.imu_bmi270.rotation,
                                 g_robot_params.imu_icm42688.rotation);
+#if HIP_CONTROL_ENABLE
+    hip_control_apply_params(&g_robot_params);
+#endif
 }
 
 static bool motion_control_build_primary(ImuReading &out, uint32_t now_ms)
@@ -211,6 +221,17 @@ void motion_control_init(void)
     s_estimator.setImuRotations(g_robot_params.imu_bmi270.rotation,
                                 g_robot_params.imu_icm42688.rotation);
     motion_modes_init();
+#if HIP_CONTROL_ENABLE
+    hip_control_init();
+    hip_control_apply_params(&g_robot_params);
+    float min_h = 0.0f;
+    float max_h = 0.0f;
+    float nominal_h = HIP_HEIGHT_DEFAULT_M;
+    if (hip_kinematics_get_height_range(&min_h, &max_h)) {
+        nominal_h = 0.5f * (min_h + max_h);
+    }
+    hip_behavior_init(nominal_h);
+#endif
 
     /* Initialize LQR params and set default mode */
     s_controller.setLqrParams(g_robot_params.lqr);
@@ -222,6 +243,8 @@ void motion_control_init(void)
     s_last_imu_ok_ms = 0U;
     s_last_imu_irq_ms = 0U;
     s_last_motor_ok_ms = 0U;
+    s_last_hip_coord_ms = 0U;
+    s_hip_behavior_mode = HIP_BEHAVIOR_NORMAL;
 #if SENSOR_ENABLE_BMI270
     s_bmi_have = false;
     s_bmi_seq = 0U;
@@ -430,6 +453,15 @@ void motion_control_tick(uint32_t now_ms)
     }
 
     bool imu_ok = primary.valid || secondary.valid;
+    float accel_z_g = 0.0f;
+    bool accel_valid = false;
+    if (primary.valid) {
+        accel_z_g = primary.accel_z / kGravity;
+        accel_valid = true;
+    } else if (secondary.valid) {
+        accel_z_g = secondary.accel_z / kGravity;
+        accel_valid = true;
+    }
     uint32_t last_irq_ms = 0U;
 #if SENSOR_ENABLE_BMI270
     uint32_t bmi_irq_ms = imu_bmi270_get_last_irq_ms();
@@ -461,6 +493,17 @@ void motion_control_tick(uint32_t now_ms)
     s_controller.setYawRates(gyro_z_filtered, yaw_rate_enc);
 
     StateEstimate estimate = s_estimator.getEstimate();
+#ifdef UNIT_TEST
+    if (s_test_estimate_override)
+    {
+        estimate.theta = s_test_estimate.theta_rad;
+        estimate.thetaDot = s_test_estimate.theta_dot;
+        estimate.x = s_test_estimate.x_m;
+        estimate.xDot = s_test_estimate.x_dot_mps;
+        estimate.gyroBias = s_test_estimate.gyro_bias;
+        estimate.valid = s_test_estimate.valid != 0U;
+    }
+#endif
     float theta_acc = s_estimator.getLastThetaAcc();
     bool theta_acc_valid = imu_ok && isfinite(theta_acc);
 
@@ -509,20 +552,56 @@ void motion_control_tick(uint32_t now_ms)
         estimate.xDot = v_enc;
         if (estimate.valid)
         {
+            hip_state_t hip_left{};
+            hip_state_t hip_right{};
+            hip_control_get_state(&hip_left, &hip_right);
+            float hip_height_dot = 0.0f;
+            int hip_count = 0;
+            if (hip_left.valid) {
+                hip_height_dot += hip_left.height_dot_m_s;
+                hip_count++;
+            }
+            if (hip_right.valid) {
+                hip_height_dot += hip_right.height_dot_m_s;
+                hip_count++;
+            }
+            if (hip_count > 0) {
+                hip_height_dot /= (float)hip_count;
+            }
+            if (fabsf(HIP_WHEEL_FF_PITCH_GAIN) > 1e-6f) {
+                estimate.theta += HIP_WHEEL_FF_PITCH_GAIN * hip_height_dot;
+            }
+
             MotionController::Command cmd = s_controller.computeControl(estimate, dt_s);
+            float wheel_scale = 1.0f;
+            if (s_hip_behavior_mode == HIP_BEHAVIOR_IMPULSE) {
+                wheel_scale = HIP_WHEEL_SCALE_IMPULSE;
+            } else if (s_hip_behavior_mode == HIP_BEHAVIOR_FLIGHT) {
+                wheel_scale = HIP_WHEEL_SCALE_FLIGHT;
+            } else if (s_hip_behavior_mode == HIP_BEHAVIOR_LANDING) {
+                wheel_scale = HIP_WHEEL_SCALE_LANDING;
+            }
+            cmd.torque.torqueLeftNm *= wheel_scale;
+            cmd.torque.torqueRightNm *= wheel_scale;
 
             /* Safety check: validate control outputs before sending to motors */
-            bool iq_left_safe = is_control_value_safe(cmd.iq.iqLeft);
-            bool iq_right_safe = is_control_value_safe(cmd.iq.iqRight);
+            bool left_safe = is_control_value_safe(cmd.torque.torqueLeftNm);
+            bool right_safe = is_control_value_safe(cmd.torque.torqueRightNm);
 
-            if (iq_left_safe && iq_right_safe)
+            if (left_safe && right_safe)
             {
-                s_last_iq_left = cmd.iq.iqLeft;
-                s_last_iq_right = cmd.iq.iqRight;
+                s_last_torque_left = cmd.torque.torqueLeftNm;
+                s_last_torque_right = cmd.torque.torqueRightNm;
                 if (s_output_enabled)
                 {
-                    motor_link_set_wheel_Iq(cmd.iq.iqLeft, cmd.iq.iqRight,
-                                            g_robot_params.balance.IqMax);
+                    float max_torque = 0.0f;
+                    if (g_robot_params.balance.IqMax > 0.0f &&
+                        PARAM_MOTOR_KT > 0.0f) {
+                        max_torque = g_robot_params.balance.IqMax * PARAM_MOTOR_KT;
+                    }
+                    motor_link_set_wheel_torques(cmd.torque.torqueLeftNm,
+                                                 cmd.torque.torqueRightNm,
+                                                 max_torque);
                 }
             }
             else
@@ -530,12 +609,12 @@ void motion_control_tick(uint32_t now_ms)
                 /* NaN/Inf detected in control output - emergency stop */
                 APP_LOG_ERROR("SAFETY: Invalid control output detected "
                               "(L=%d R=%d) - emergency zero",
-                              iq_left_safe ? 1 : 0, iq_right_safe ? 1 : 0);
-                s_last_iq_left = 0.0f;
-                s_last_iq_right = 0.0f;
+                              left_safe ? 1 : 0, right_safe ? 1 : 0);
+                s_last_torque_left = 0.0f;
+                s_last_torque_right = 0.0f;
                 if (s_output_enabled)
                 {
-                    motor_link_set_wheel_Iq(0.0f, 0.0f, 0.0f);
+                    motor_link_set_wheel_torques(0.0f, 0.0f, 0.0f);
                 }
                 /* Reset controller state to clear any corrupted integrators */
                 s_controller.resetPidState();
@@ -543,23 +622,66 @@ void motion_control_tick(uint32_t now_ms)
         }
         else
         {
-            s_last_iq_left = 0.0f;
-            s_last_iq_right = 0.0f;
+            s_last_torque_left = 0.0f;
+            s_last_torque_right = 0.0f;
             if (s_output_enabled)
             {
-                motor_link_set_wheel_Iq(0.0f, 0.0f, 0.0f);
+                motor_link_set_wheel_torques(0.0f, 0.0f, 0.0f);
             }
         }
     }
     else
     {
-        s_last_iq_left = 0.0f;
-        s_last_iq_right = 0.0f;
+        s_last_torque_left = 0.0f;
+        s_last_torque_right = 0.0f;
         if (s_output_enabled)
         {
-            motor_link_set_wheel_Iq(0.0f, 0.0f, 0.0f);
+            motor_link_set_wheel_torques(0.0f, 0.0f, 0.0f);
         }
     }
+
+#if HIP_CONTROL_ENABLE
+    hip_behavior_set_imu_accel(accel_z_g, accel_valid);
+    if (s_last_hip_coord_ms == 0U || (now_ms - s_last_hip_coord_ms) >= 20U) {
+        s_last_hip_coord_ms = now_ms;
+        hip_state_t hip_left{};
+        hip_state_t hip_right{};
+        hip_control_get_state(&hip_left, &hip_right);
+        if (s_last_lqr_lut_ms == 0U || (now_ms - s_last_lqr_lut_ms) >= 20U) {
+            s_last_lqr_lut_ms = now_ms;
+            float hip_theta = 0.0f;
+            int hip_count = 0;
+            if (hip_left.valid) {
+                hip_theta += hip_left.theta_rad;
+                hip_count++;
+            }
+            if (hip_right.valid) {
+                hip_theta += hip_right.theta_rad;
+                hip_count++;
+            }
+            if (hip_count > 0) {
+                hip_theta /= (float)hip_count;
+                float K_lut[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                if (lqr_lut_eval(hip_theta, K_lut)) {
+                    lqr_params_t lqr = g_robot_params.lqr;
+                    for (int i = 0; i < 4; ++i) {
+                        lqr.K[i] = K_lut[i];
+                    }
+                    s_controller.setLqrParams(lqr);
+                }
+            }
+        }
+        hip_target_t target{};
+        hip_behavior_tick(now_ms,
+                          motion_modes_get(),
+                          &hip_left,
+                          &hip_right,
+                          &target,
+                          &s_hip_behavior_mode);
+        hip_control_set_target(&target);
+    }
+    hip_control_tick(now_ms);
+#endif
 
     /* Blackbox logging */
     LogRecord rec;
@@ -651,8 +773,8 @@ void motion_control_tick(uint32_t now_ms)
         rec.P = s_controller.getLastPitchP();
         rec.I = s_controller.getLastPitchI();
         rec.D = s_controller.getLastPitchD();
-        rec.uL_cmd = s_last_iq_left;
-        rec.uR_cmd = s_last_iq_right;
+        rec.uL_cmd = s_last_torque_left;
+        rec.uR_cmd = s_last_torque_right;
 
         /* LQR diagnostics */
         InnerCtrlDiag lqr_diag{};
@@ -799,8 +921,8 @@ bool motion_control_get_control_output(motion_control_output_t *out)
     {
         return false;
     }
-    out->iq_left = s_last_iq_left;
-    out->iq_right = s_last_iq_right;
+    out->torque_left_nm = s_last_torque_left;
+    out->torque_right_nm = s_last_torque_right;
     out->pitch_target_rad = s_controller.getLastPitchTarget();
     return true;
 }
@@ -819,4 +941,14 @@ void motion_control_set_inner_mode(uint8_t mode)
 uint8_t motion_control_get_inner_mode(void)
 {
     return (s_controller.getActiveMode() == InnerLongMode::LQR) ? 1U : 0U;
+}
+
+uint8_t motion_control_get_hip_behavior_mode(void)
+{
+    return (uint8_t)s_hip_behavior_mode;
+}
+
+uint8_t motion_control_get_hip_phase_progress(void)
+{
+    return hip_behavior_get_phase_progress();
 }

@@ -34,11 +34,11 @@ TEST_CASE("MotionController applyVelocitySlew limits step", "[motion_controller]
     MotionController::ControlOutput out = controller.test_applyVelocitySlew(desired, 1.0f);
 
     const float maxStep = VELOCITY_SLEW_RATE_RAD_PER_S2 * 1.0f;
-    CHECK(out.iqLeft == Catch::Approx(10.0f));
-    CHECK(out.iqRight == Catch::Approx(-10.0f));
+    CHECK(out.torqueLeftNm == Catch::Approx(10.0f));
+    CHECK(out.torqueRightNm == Catch::Approx(-10.0f));
 }
 
-TEST_CASE("MotionController computeLqrUSum uses gains", "[motion_controller]")
+TEST_CASE("MotionController computeLqrUSumNm uses gains", "[motion_controller]")
 {
     RobotParams params;
     MotionController controller(params);
@@ -55,7 +55,7 @@ TEST_CASE("MotionController computeLqrUSum uses gains", "[motion_controller]")
     state.theta = 0.2f;
     state.thetaDot = -0.1f;
 
-    float u = controller.test_computeLqrUSum(state, 1.0f, 0.0f);
+    float u = controller.test_computeLqrUSumNm(state, 1.0f, 0.0f);
     // v_err = 0.5, theta_err = 0.2, thetaDot = -0.1
     // u = -(2*0.5 + 3*0.2 + 4*(-0.1)) = -(1.0 + 0.6 -0.4) = -1.2
     CHECK(u == Catch::Approx(-1.2f));

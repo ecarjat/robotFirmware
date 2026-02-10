@@ -5,8 +5,10 @@
 #include "app_link.h"
 #include "app_main.h"
 #include "app_motor.h"
+#include "hip_control.h"
 #include "param_storage.h"
 #include "robot_protocol.h"
+#include <math.h>
 #include <string.h>
 
 #include "control_timer.h"
@@ -158,6 +160,37 @@ void app_rpc_handle(const robot_frame_t *frame) {
     app_disarm_robot();
     app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_OK, 0U, 0U, NULL, 0U,
                             resp_seq);
+    return;
+  }
+  case ROBOT_RPC_METHOD_HIP_CALIB_ZERO: {
+    if (req_data_len != 0U) {
+      app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_LEN, offset,
+                              length, NULL, 0U, resp_seq);
+      return;
+    }
+    hip_state_t left = {0};
+    hip_state_t right = {0};
+    hip_control_get_state(&left, &right);
+    if (!left.valid || !right.valid) {
+      app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_NOT_READY, 0U, 0U,
+                              NULL, 0U, resp_seq);
+      return;
+    }
+    g_robot_params.hip_left_zero_offset_rev = left.pos_rev;
+    g_robot_params.hip_right_zero_offset_rev = right.pos_rev;
+    motion_control_apply_params();
+    uint8_t status = ROBOT_RPC_STATUS_OK;
+    if ((req.flags & ROBOT_RPC_FLAG_SAVE) != 0U) {
+      if (!param_storage_can_save()) {
+        status = ROBOT_RPC_STATUS_NOT_READY;
+      } else {
+        int rc = param_storage_save(&g_robot_params);
+        if (rc != PARAM_OK) {
+          status = ROBOT_RPC_STATUS_STORAGE;
+        }
+      }
+    }
+    app_rpc_send_param_resp(req.method, status, 0U, 0U, NULL, 0U, resp_seq);
     return;
   }
   case ROBOT_RPC_METHOD_SET_PARAM: {

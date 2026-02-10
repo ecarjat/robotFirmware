@@ -3,8 +3,13 @@
 
 #include "log.h"
 #include "app_log_macros.h"
+
+#ifdef APP_CONFIG_HOST
+#include "app_config_host.h"
+#else
 #include "main.h"
 #include "usb_device.h"
+#endif
 
 #define APP_IDLE_TICK_MS 300U
 #define APP_IDLE_BUDGET_US 1216U
@@ -53,6 +58,143 @@
 
 #ifndef APP_ENABLE_PROFILING
 #define APP_ENABLE_PROFILING 1
+#endif
+
+#ifndef HIP_CONTROL_ENABLE
+#define HIP_CONTROL_ENABLE 1
+#endif
+
+#ifndef HIP_CAN_NODE_LEFT
+#define HIP_CAN_NODE_LEFT 0x03U
+#endif
+#ifndef HIP_CAN_NODE_RIGHT
+#define HIP_CAN_NODE_RIGHT 0x04U
+#endif
+
+#ifndef HIP_CMD_PERIOD_MS
+#define HIP_CMD_PERIOD_MS 10U
+#endif
+#ifndef HIP_TELEM_PERIOD_MS
+#define HIP_TELEM_PERIOD_MS 20U
+#endif
+#ifndef HIP_HEARTBEAT_PERIOD_MS
+#define HIP_HEARTBEAT_PERIOD_MS 200U
+#endif
+#ifndef HIP_TELEM_TIMEOUT_MS
+#define HIP_TELEM_TIMEOUT_MS 200U
+#endif
+#ifndef HIP_LIMIT_DEBOUNCE_SAMPLES
+#define HIP_LIMIT_DEBOUNCE_SAMPLES 4U
+#endif
+
+#ifndef HIP_THETA_MIN_DEG
+#define HIP_THETA_MIN_DEG 23.95f
+#endif
+#ifndef HIP_THETA_MAX_DEG
+#define HIP_THETA_MAX_DEG 61.04f
+#endif
+
+#ifndef HIP_HEIGHT_SLEW_MPS
+#define HIP_HEIGHT_SLEW_MPS 0.2f
+#endif
+#ifndef HIP_VEL_MAX_REV_S
+#define HIP_VEL_MAX_REV_S 0.5f
+#endif
+#ifndef HIP_TORQUE_MAX_NM
+#define HIP_TORQUE_MAX_NM 20.0f
+#endif
+#ifndef HIP_STIFFNESS_N_M_DEFAULT
+#define HIP_STIFFNESS_N_M_DEFAULT 800.0f
+#endif
+#ifndef HIP_DAMPING_N_S_M_DEFAULT
+#define HIP_DAMPING_N_S_M_DEFAULT 80.0f
+#endif
+#ifndef HIP_HEIGHT_DEFAULT_M
+#define HIP_HEIGHT_DEFAULT_M 0.5f
+#endif
+
+#ifndef HIP_BEHAVIOR_CROUCH_MS
+#define HIP_BEHAVIOR_CROUCH_MS 150U
+#endif
+#ifndef HIP_BEHAVIOR_IMPULSE_MS
+#define HIP_BEHAVIOR_IMPULSE_MS 100U
+#endif
+#ifndef HIP_BEHAVIOR_FLIGHT_MS
+#define HIP_BEHAVIOR_FLIGHT_MS 200U
+#endif
+#ifndef HIP_BEHAVIOR_LANDING_MS
+#define HIP_BEHAVIOR_LANDING_MS 200U
+#endif
+
+#ifndef HIP_CROUCH_DEPTH_M
+#define HIP_CROUCH_DEPTH_M 0.05f
+#endif
+#ifndef HIP_IMPULSE_HEIGHT_M
+#define HIP_IMPULSE_HEIGHT_M 0.08f
+#endif
+#ifndef HIP_IMPULSE_LIFTOFF_VEL_MPS
+#define HIP_IMPULSE_LIFTOFF_VEL_MPS 0.1f
+#endif
+#ifndef HIP_LIFTOFF_ACCEL_G
+#define HIP_LIFTOFF_ACCEL_G 0.7f
+#endif
+#ifndef HIP_LANDING_ACCEL_G
+#define HIP_LANDING_ACCEL_G 1.2f
+#endif
+
+#ifndef HIP_CROUCH_RATE_MPS
+#define HIP_CROUCH_RATE_MPS 0.15f
+#endif
+#ifndef HIP_IMPULSE_RATE_MPS
+#define HIP_IMPULSE_RATE_MPS 0.3f
+#endif
+
+#ifndef HIP_GROUND_STIFFNESS_N_M
+#define HIP_GROUND_STIFFNESS_N_M 600.0f
+#endif
+#ifndef HIP_GROUND_DAMPING_N_S_M
+#define HIP_GROUND_DAMPING_N_S_M 60.0f
+#endif
+#ifndef HIP_FLIGHT_STIFFNESS_N_M
+#define HIP_FLIGHT_STIFFNESS_N_M 200.0f
+#endif
+#ifndef HIP_FLIGHT_DAMPING_N_S_M
+#define HIP_FLIGHT_DAMPING_N_S_M 20.0f
+#endif
+#ifndef HIP_LANDING_STIFFNESS_N_M
+#define HIP_LANDING_STIFFNESS_N_M 1000.0f
+#endif
+#ifndef HIP_LANDING_DAMPING_N_S_M
+#define HIP_LANDING_DAMPING_N_S_M 120.0f
+#endif
+
+#ifndef HIP_WHEEL_FF_PITCH_GAIN
+#define HIP_WHEEL_FF_PITCH_GAIN 0.0f
+#endif
+
+#ifndef HIP_WHEEL_SCALE_IMPULSE
+#define HIP_WHEEL_SCALE_IMPULSE 0.7f
+#endif
+#ifndef HIP_WHEEL_SCALE_FLIGHT
+#define HIP_WHEEL_SCALE_FLIGHT 0.3f
+#endif
+#ifndef HIP_WHEEL_SCALE_LANDING
+#define HIP_WHEEL_SCALE_LANDING 0.6f
+#endif
+
+#ifndef HIP_STALL_ERR_REV
+#define HIP_STALL_ERR_REV 0.02f
+#endif
+#ifndef HIP_STALL_TIMEOUT_MS
+#define HIP_STALL_TIMEOUT_MS 500U
+#endif
+
+#ifndef HIP_RECOVERY_TIMEOUT_MS
+#define HIP_RECOVERY_TIMEOUT_MS 2000U
+#endif
+
+#ifndef HIP_HAS_ENABLE_PIN
+#define HIP_HAS_ENABLE_PIN 0
 #endif
 
 extern USBD_HandleTypeDef hUsbDeviceHS;

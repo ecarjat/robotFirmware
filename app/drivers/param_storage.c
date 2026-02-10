@@ -614,6 +614,12 @@ void param_storage_get_defaults(robot_params_t *params)
     /* Blackbox logging */
     params->log_fields_mask = LOG_FIELDS_MASK_DEFAULT; /* IMU, EKF, wheels, PID */
     params->dump_seconds_default = 30U; /* 30 seconds default dump window */
+
+    /* Hip calibration defaults */
+    params->hip_left_zero_offset_rev = 0.0f;
+    params->hip_right_zero_offset_rev = 0.0f;
+    params->hip_left_dir_sign = 1;
+    params->hip_right_dir_sign = 1;
 }
 
 int param_storage_erase(void)

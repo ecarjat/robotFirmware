@@ -18,10 +18,10 @@ enum class InnerLongMode {
  * @brief Inner controller diagnostics for LQR mode
  */
 struct InnerCtrlDiag {
-    float u_sum_cmd;      /**< Final blended u_sum output (A) */
-    float u_sum_pid;      /**< PID-computed u_sum before blend (A) */
-    float u_sum_lqr;      /**< LQR-computed u_sum before blend (A) */
-    float u_diff_cmd;     /**< Yaw loop differential output (A) */
+    float u_sum_cmd;      /**< Final blended u_sum output (Nm) */
+    float u_sum_pid;      /**< PID-computed u_sum before blend (Nm) */
+    float u_sum_lqr;      /**< LQR-computed u_sum before blend (Nm) */
+    float u_diff_cmd;     /**< Yaw loop differential output (Nm) */
     float alpha;          /**< Current blend factor (0=PID, 1=LQR) */
     bool sat_left;        /**< Left wheel saturated flag */
     bool sat_right;       /**< Right wheel saturated flag */
@@ -34,12 +34,12 @@ struct InnerCtrlDiag {
 class MotionController {
 public:
     struct ControlOutput {
-        float iqLeft;
-        float iqRight;
+        float torqueLeftNm;
+        float torqueRightNm;
     };
 
     struct Command {
-        ControlOutput iq{0.0f, 0.0f};
+        ControlOutput torque{0.0f, 0.0f};
     };
 
     explicit MotionController(const RobotParams& robotParams);
@@ -47,6 +47,7 @@ public:
     void setRobotParams(const RobotParams& params);
     void setBalanceGains(const balance_gains_t& gains);
     void setLqrParams(const lqr_params_t& lqr);
+    void setLqrEquilibrium(float thetaRef, float uEq);
     void setControlDt(float dtSeconds);
 
     void setTeleopCommands(float forwardCmd, float turnCmd);
@@ -94,9 +95,9 @@ public:
         return applyVelocitySlew(desired, dt);
     }
 
-    float test_computeLqrUSum(const StateEstimate& state, float vRef, float thetaRef)
+    float test_computeLqrUSumNm(const StateEstimate& state, float vRef, float thetaRef)
     {
-        return computeLqrUSum(state, vRef, thetaRef);
+        return computeLqrUSumNm(state, vRef, thetaRef);
     }
 #endif
 
@@ -176,10 +177,14 @@ private:
     float _alpha = 0.0f;  /* Blend factor: 0=PID, 1=LQR */
     float _prevUSum = 0.0f;
     bool _prevUSumValid = false;
+    float _xRef = 0.0f;
+    bool _xRefValid = false;
+    float _thetaRef = 0.0f;
+    float _uEq = 0.0f;
     InnerCtrlDiag _diag = {};
     bool _diagValid = false;
 
-    float computeLqrUSum(const StateEstimate& state, float vRef, float thetaRef);
+    float computeLqrUSumNm(const StateEstimate& state, float vRef, float thetaRef);
     void updateBlendAlpha(float dt);
 
     static constexpr float DERIVATIVE_FILTER_ALPHA = 0.1f;

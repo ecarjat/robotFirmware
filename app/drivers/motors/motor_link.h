@@ -43,6 +43,7 @@ void motor_link_set_motor_directions(int8_t left_dir, int8_t right_dir);
 
 void motor_link_set_wheel_Iq(float left_A, float right_A, float max_A);
 void motor_link_set_wheel_torques(float left_Nm, float right_Nm, float max_Nm);
+bool motor_link_torque_to_iq(float torque_nm, float *iq_out);
 
 bool motor_link_get_wheel_velocities(float *left_rad_s, float *right_rad_s);
 

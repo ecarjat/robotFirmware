@@ -16,6 +16,7 @@ typedef struct {
   void (*set_motor_directions)(int8_t left_dir, int8_t right_dir);
   void (*set_wheel_Iq)(float left_A, float right_A, float max_A);
   void (*set_wheel_torques)(float left_Nm, float right_Nm, float max_Nm);
+  bool (*torque_to_iq)(float torque_nm, float *iq_out);
   bool (*get_wheel_velocities)(float *left_rad_s, float *right_rad_s);
   bool (*send_command)(motor_side_t side, uint8_t cmd_id);
   bool (*send_write)(motor_side_t side);

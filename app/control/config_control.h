@@ -152,8 +152,8 @@
 #define LQR_K3_THETADOT  0.8f      /* Pitch rate gain */
 
 /* LQR limits */
-#define LQR_U_LIMIT            3.0f     /* Max |u_sum| (A) */
-#define LQR_DU_LIMIT           50.0f    /* Max |du_sum| per tick (A/s) */
+#define LQR_U_LIMIT            5.0f  /* Max |u_sum| (Nm) */
+#define LQR_DU_LIMIT           10.0f   /* Max |du_sum| per second (Nm/s) */
 #define LQR_THETA_REF_LIMIT    0.15f    /* Max |theta_ref| (rad) */
 #define LQR_V_REF_LIMIT        0.6f     /* Max |v_ref| (m/s) */
 

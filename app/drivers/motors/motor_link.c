@@ -70,6 +70,14 @@ void motor_link_set_wheel_torques(float left_Nm, float right_Nm, float max_Nm) {
   }
 }
 
+bool motor_link_torque_to_iq(float torque_nm, float *iq_out) {
+  const motor_backend_ops_t *ops = motor_link_ops();
+  if (ops != NULL && ops->torque_to_iq != NULL) {
+    return ops->torque_to_iq(torque_nm, iq_out);
+  }
+  return false;
+}
+
 bool motor_link_get_wheel_velocities(float *left_rad_s, float *right_rad_s) {
   const motor_backend_ops_t *ops = motor_link_ops();
   if (ops != NULL && ops->get_wheel_velocities != NULL) {

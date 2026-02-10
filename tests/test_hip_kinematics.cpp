@@ -54,3 +54,23 @@ TEST_CASE("hip_kinematics_theta_from_height inverts height", "[hip]") {
   REQUIRE(hip_kinematics_height_from_theta(theta_rad, &height_m));
   CHECK(height_m == Catch::Approx(0.6775f).margin(0.005f));
 }
+
+TEST_CASE("hip_kinematics_get_height_range returns valid bounds", "[hip]") {
+  float h_min = 0.0f;
+  float h_max = 0.0f;
+  REQUIRE(hip_kinematics_get_height_range(&h_min, &h_max));
+  CHECK(h_min > 0.0f);
+  CHECK(h_max > h_min);
+}
+
+TEST_CASE("hip_kinematics_theta_from_height rejects out-of-range heights", "[hip]") {
+  float h_min = 0.0f;
+  float h_max = 0.0f;
+  REQUIRE(hip_kinematics_get_height_range(&h_min, &h_max));
+
+  float theta = 0.0f;
+  CHECK_FALSE(hip_kinematics_theta_from_height(h_min - 0.01f, &theta));
+  CHECK_FALSE(hip_kinematics_theta_from_height(h_max + 0.01f, &theta));
+  CHECK(hip_kinematics_theta_from_height(h_min, &theta));
+  CHECK(hip_kinematics_theta_from_height(h_max, &theta));
+}

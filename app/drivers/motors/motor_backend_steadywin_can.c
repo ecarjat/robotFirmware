@@ -55,6 +55,7 @@ const motor_backend_ops_t motor_backend_steadywin_can_ops = {
     .set_motor_directions = motor_backend_steadywin_can_set_motor_directions,
     .set_wheel_Iq = motor_backend_steadywin_can_set_wheel_Iq,
     .set_wheel_torques = motor_backend_steadywin_can_set_wheel_torques,
+    .torque_to_iq = motor_backend_steadywin_can_torque_to_iq,
     .get_wheel_velocities = motor_backend_steadywin_can_get_wheel_velocities,
     .send_command = motor_backend_steadywin_can_send_command,
     .send_write = motor_backend_steadywin_can_send_write,

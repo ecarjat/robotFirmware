@@ -12,6 +12,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(USE_FETCHCONTENT_CATCH2 "Fetch Catch2 if not found" ON)
 
+add_compile_definitions(APP_CONFIG_HOST)
+
 include(FetchContent)
 find_package(Catch2 3 QUIET)
 
@@ -36,6 +38,7 @@ add_executable(test_hip_kinematics
 )
 
 target_include_directories(test_hip_kinematics PRIVATE
+  fakes
   ../app/control
 )
 
@@ -84,9 +87,97 @@ target_link_libraries(test_control_timer PRIVATE Catch2::Catch2WithMain)
 
 add_test(NAME test_control_timer COMMAND test_control_timer)
 
+add_executable(test_hip_limits
+  test_hip_limits.cpp
+  ../app/control/hip_limits.c
+)
+
+target_include_directories(test_hip_limits PRIVATE
+  ../app/control
+)
+
+target_link_libraries(test_hip_limits PRIVATE Catch2::Catch2WithMain)
+
+add_test(NAME test_hip_limits COMMAND test_hip_limits)
+
+add_executable(test_lqr_lut
+  test_lqr_lut.cpp
+  ../app/control/lqr_lut.c
+)
+
+target_include_directories(test_lqr_lut PRIVATE
+  ../app/control
+)
+
+target_link_libraries(test_lqr_lut PRIVATE Catch2::Catch2WithMain)
+
+add_test(NAME test_lqr_lut COMMAND test_lqr_lut)
+
+add_executable(test_hip_behavior
+  test_hip_behavior.cpp
+  fakes/log_fake.c
+  ../app/control/hip_behavior.c
+)
+
+target_include_directories(test_hip_behavior PRIVATE
+  fakes
+  ../app/control
+  ../app/utils
+  ../app
+  ../app/drivers
+)
+
+target_link_libraries(test_hip_behavior PRIVATE Catch2::Catch2WithMain)
+
+add_test(NAME test_hip_behavior COMMAND test_hip_behavior)
+
+add_executable(test_hip_control
+  test_hip_control.cpp
+  fakes/hal_fake.c
+  fakes/log_fake.c
+  ../app/control/hip_control.c
+  ../app/control/hip_limits.c
+  ../app/control/hip_kinematics.c
+)
+
+target_include_directories(test_hip_control PRIVATE
+  fakes
+  ../app/control
+  ../app/utils
+  ../app
+  ../app/drivers
+)
+
+target_link_libraries(test_hip_control PRIVATE Catch2::Catch2WithMain)
+
+add_test(NAME test_hip_control COMMAND test_hip_control)
+
+add_executable(test_hip_integration
+  test_hip_integration.cpp
+  fakes/hal_fake.c
+  fakes/log_fake.c
+  ../app/control/hip_behavior.c
+  ../app/control/hip_control.c
+  ../app/control/hip_limits.c
+  ../app/control/hip_kinematics.c
+)
+
+target_include_directories(test_hip_integration PRIVATE
+  fakes
+  ../app/control
+  ../app/utils
+  ../app
+  ../app/drivers
+)
+
+target_link_libraries(test_hip_integration PRIVATE Catch2::Catch2WithMain)
+
+add_test(NAME test_hip_integration COMMAND test_hip_integration)
+
 add_executable(test_motion_controller
   test_motion_controller.cpp
   fakes/log_fake.c
+  fakes/motor_link_fake.c
   ../app/control/MotionController.cpp
 )
 
@@ -148,6 +239,12 @@ add_executable(test_motion_control
   fakes/imu_fake.c
   fakes/motor_link_fake.c
   fakes/app_main_fake.c
+  fakes/hal_fake.c
+  ../app/control/hip_behavior.c
+  ../app/control/hip_kinematics.c
+  ../app/control/lqr_lut.c
+  ../app/control/hip_control.c
+  ../app/control/hip_limits.c
   ../app/control/motion_control.cpp
   ../app/control/motion_modes.cpp
   ../app/control/MotionController.cpp
@@ -172,3 +269,65 @@ target_compile_definitions(test_motion_control PRIVATE UNIT_TEST=1)
 target_link_libraries(test_motion_control PRIVATE Catch2::Catch2WithMain)
 
 add_test(NAME test_motion_control COMMAND test_motion_control)
+
+add_executable(test_app_telem
+  test_app_telem.cpp
+  fakes/app_link_fake.c
+  fakes/app_adc_fake.c
+  fakes/led_status_fake.c
+  fakes/hip_control_fake.c
+  fakes/motion_control_fake.c
+  fakes/motor_link_fake.c
+  fakes/blackbox_dump_fake.c
+  fakes/app_main_fake.c
+  fakes/hal_fake.c
+  fakes/log_fake.c
+  app_telem_wrapper.c
+)
+
+target_include_directories(test_app_telem PRIVATE
+  fakes
+  ../app
+  ../app/utils
+  ../app/control
+  ../app/drivers
+  ../app/drivers/motors
+  ../app/logging
+  ../common
+  ../common/shared_protocol
+)
+
+target_link_libraries(test_app_telem PRIVATE Catch2::Catch2WithMain)
+
+add_test(NAME test_app_telem COMMAND test_app_telem)
+
+add_executable(test_app_rpc
+  test_app_rpc.cpp
+  fakes/app_link_fake.c
+  fakes/app_motor_fake.c
+  fakes/app_arm_fake.c
+  fakes/app_imu_fake.c
+  fakes/hip_control_fake.c
+  fakes/param_storage_fake.c
+  fakes/control_timer_fake.c
+  fakes/motion_control_fake.c
+  fakes/app_main_fake.c
+  fakes/hal_fake.c
+  fakes/log_fake.c
+  app_rpc_wrapper.c
+)
+
+target_include_directories(test_app_rpc PRIVATE
+  fakes
+  ../app
+  ../app/utils
+  ../app/control
+  ../app/drivers
+  ../app/drivers/motors
+  ../common
+  ../common/shared_protocol
+)
+
+target_link_libraries(test_app_rpc PRIVATE Catch2::Catch2WithMain)
+
+add_test(NAME test_app_rpc COMMAND test_app_rpc)

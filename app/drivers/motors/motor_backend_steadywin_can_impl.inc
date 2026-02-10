@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "app_config.h"
+#include "hip_control.h"
 #include "main.h"
 #include "stm32h7xx_hal.h"
 #include "stm32h7xx_hal_fdcan.h"
@@ -375,6 +376,20 @@ static bool motor_link_config_filters(void) {
     return false;
   }
 
+  filter.FilterIndex = 2U;
+  filter.FilterID1 = (HIP_CAN_NODE_LEFT << 5);
+  filter.FilterID2 = 0x7E0U;
+  if (HAL_FDCAN_ConfigFilter(&hfdcan1, &filter) != HAL_OK) {
+    return false;
+  }
+
+  filter.FilterIndex = 3U;
+  filter.FilterID1 = (HIP_CAN_NODE_RIGHT << 5);
+  filter.FilterID2 = 0x7E0U;
+  if (HAL_FDCAN_ConfigFilter(&hfdcan1, &filter) != HAL_OK) {
+    return false;
+  }
+
   (void)HAL_FDCAN_ConfigGlobalFilter(
       &hfdcan1, FDCAN_REJECT, FDCAN_REJECT, FDCAN_REJECT_REMOTE,
       FDCAN_REJECT_REMOTE);
@@ -416,6 +431,9 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan,
       continue;
     }
     uint8_t len = motor_link_dlc_to_len(rx.DataLength);
+    if (hip_control_on_can_rx(rx.Identifier, data, len, HAL_GetTick())) {
+      continue;
+    }
     (void)motor_link_rx_push(rx.Identifier, len, data, HAL_GetTick());
   }
 }
@@ -430,6 +448,7 @@ void HAL_FDCAN_ErrorStatusCallback(FDCAN_HandleTypeDef *hfdcan,
     s_bus_off = 1U;
     s_enable_applied = 0U;
     motor_link_apply_enable_gpio(false);
+    hip_control_on_bus_off();
   }
 }
 
@@ -656,21 +675,40 @@ void motor_link_set_wheel_Iq(float left_A, float right_A, float max_A) {
   s_last_target_ms = now_ms;
 }
 
+bool motor_backend_steadywin_can_torque_to_iq(float torque_nm, float *iq_out);
+
 void motor_link_set_wheel_torques(float left_Nm, float right_Nm, float max_Nm) {
   if (!isfinite(left_Nm) || !isfinite(right_Nm) || !isfinite(max_Nm)) {
     motor_link_set_wheel_Iq(0.0f, 0.0f, 0.0f);
     return;
   }
 
-  float kt = motor_link_resolve_kt();
-  if (kt <= 0.0f) {
+  float left_A = 0.0f;
+  float right_A = 0.0f;
+  float max_A = 0.0f;
+  if (!motor_backend_steadywin_can_torque_to_iq(left_Nm, &left_A) ||
+      !motor_backend_steadywin_can_torque_to_iq(right_Nm, &right_A)) {
     return;
   }
-
-  float left_A = left_Nm / kt;
-  float right_A = right_Nm / kt;
-  float max_A = (max_Nm > 0.0f) ? (max_Nm / kt) : 0.0f;
+  if (max_Nm > 0.0f &&
+      !motor_backend_steadywin_can_torque_to_iq(max_Nm, &max_A)) {
+    max_A = 0.0f;
+  }
   motor_link_set_wheel_Iq(left_A, right_A, max_A);
+}
+
+bool motor_backend_steadywin_can_torque_to_iq(float torque_nm, float *iq_out) {
+  if (iq_out == NULL || !isfinite(torque_nm)) {
+    return false;
+  }
+
+  float kt = motor_link_resolve_kt();
+  if (kt <= 0.0f) {
+    return false;
+  }
+
+  *iq_out = torque_nm / kt;
+  return true;
 }
 
 bool motor_link_get_wheel_velocities(float *left_rad_s, float *right_rad_s) {

@@ -16,8 +16,6 @@ typedef struct {
 #define HIP_INNER_OFFSET_KC_M 0.07506f
 
 /* Theta range (degrees) for valid linkage motion. */
-#define HIP_THETA_MIN_DEG 23.95f
-#define HIP_THETA_MAX_DEG 61.04f
 #define HIP_DEG_TO_RAD ((float)(M_PI / 180.0))
 
 /* Pin joint location in solver coordinates (+Y down). */
@@ -253,5 +251,16 @@ bool hip_kinematics_theta_from_height(float height_m, float *theta_rad) {
   const float t = (fabsf(h_hi - h_lo) < HIP_EPS) ? 0.0f
                                                  : (height_m - h_lo) / (h_hi - h_lo);
   *theta_rad = hip_theta_lut[lo] + t * (hip_theta_lut[hi] - hip_theta_lut[lo]);
+  return true;
+}
+
+bool hip_kinematics_get_height_range(float *min_m, float *max_m)
+{
+  hip_init_lut();
+  if (!hip_lut_valid || min_m == NULL || max_m == NULL) {
+    return false;
+  }
+  *min_m = hip_height_min;
+  *max_m = hip_height_max;
   return true;
 }

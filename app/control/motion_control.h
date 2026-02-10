@@ -71,19 +71,19 @@ typedef struct
 bool motion_control_get_estimate(motion_control_estimate_t *out);
 
 /**
- * @brief Control output (for telemetry)
+ * @brief Control output (for telemetry, torque units)
  */
 typedef struct
 {
-    float iq_left;
-    float iq_right;
+    float torque_left_nm;
+    float torque_right_nm;
     float pitch_target_rad;
 } motion_control_output_t;
 
 bool motion_control_get_control_output(motion_control_output_t *out);
 
 /**
- * @brief Check if motor output is currently saturated (hitting IqMax)
+ * @brief Check if motor output is currently saturated (torque limit)
  */
 bool motion_control_is_saturated(void);
 
@@ -98,6 +98,9 @@ void motion_control_set_inner_mode(uint8_t mode);
  * @return 0=PID, 1=LQR
  */
 uint8_t motion_control_get_inner_mode(void);
+
+uint8_t motion_control_get_hip_behavior_mode(void);
+uint8_t motion_control_get_hip_phase_progress(void);
 
 #ifdef UNIT_TEST
 void motion_control_test_set_estimate(const motion_control_estimate_t *est);

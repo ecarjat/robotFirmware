@@ -118,11 +118,11 @@ typedef struct __attribute__((packed)) {
   float    P;                  /* Proportional term */
   float    I;                  /* Integral term */
   float    D;                  /* Derivative term */
-  float    u_common;           /* Common drive command (u_sum_cmd) */
-  float    u_turn;             /* Turn differential command */
-  float    uL_cmd;             /* Left motor command (Iq proxy) */
-  float    uR_cmd;             /* Right motor command (Iq proxy) */
-  float    u_sum_lqr;          /* LQR u_sum before blending */
+  float    u_common;           /* Common drive command (u_sum_cmd, Nm) */
+  float    u_turn;             /* Turn differential command (Nm) */
+  float    uL_cmd;             /* Left motor command (Nm) */
+  float    uR_cmd;             /* Right motor command (Nm) */
+  float    u_sum_lqr;          /* LQR u_sum before blending (Nm) */
   uint8_t  lqr_alpha;          /* LQR blend factor (0-255 = 0.0-1.0) */
   uint8_t  pad[3];             /* Padding to maintain alignment */
 

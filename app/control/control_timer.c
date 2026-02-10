@@ -25,11 +25,7 @@ extern volatile uint32_t test_coredebug_demcr;
 #define CoreDebug_DEMCR_TRCENA (1UL << 24)
 
 /* External timer handle from main.c */
-#ifndef CONTROL_TIMER_TEST
-#include "app_config.h"
-#else
 extern TIM_HandleTypeDef htim2;
-#endif
 
 /* Default control period in microseconds */
 #define CONTROL_PERIOD_DEFAULT_US ((uint32_t)(1000000.0f / CONTROL_DEFAULT_HZ + 0.5f))

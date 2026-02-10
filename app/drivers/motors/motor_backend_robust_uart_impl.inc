@@ -1163,6 +1163,8 @@ void motor_link_set_wheel_Iq(float left_A, float right_A, float max_A) {
   }
 }
 
+bool motor_backend_robust_uart_torque_to_iq(float torque_nm, float *iq_out);
+
 void motor_link_set_wheel_torques(float left_Nm, float right_Nm, float max_Nm) {
   /* Defense-in-depth: reject NaN/Inf input values */
   if (!isfinite(left_Nm) || !isfinite(right_Nm) || !isfinite(max_Nm)) {
@@ -1170,15 +1172,32 @@ void motor_link_set_wheel_torques(float left_Nm, float right_Nm, float max_Nm) {
     return;
   }
 
-  float kt = motor_link_resolve_kt();
-  if (kt <= 0.0f) {
+  float left_A = 0.0f;
+  float right_A = 0.0f;
+  float max_A = 0.0f;
+  if (!motor_backend_robust_uart_torque_to_iq(left_Nm, &left_A) ||
+      !motor_backend_robust_uart_torque_to_iq(right_Nm, &right_A)) {
     return;
   }
-
-  float left_A = left_Nm / kt;
-  float right_A = right_Nm / kt;
-  float max_A = (max_Nm > 0.0f) ? (max_Nm / kt) : 0.0f;
+  if (max_Nm > 0.0f &&
+      !motor_backend_robust_uart_torque_to_iq(max_Nm, &max_A)) {
+    max_A = 0.0f;
+  }
   motor_link_set_wheel_Iq(left_A, right_A, max_A);
+}
+
+bool motor_backend_robust_uart_torque_to_iq(float torque_nm, float *iq_out) {
+  if (iq_out == NULL || !isfinite(torque_nm)) {
+    return false;
+  }
+
+  float kt = motor_link_resolve_kt();
+  if (kt <= 0.0f) {
+    return false;
+  }
+
+  *iq_out = torque_nm / kt;
+  return true;
 }
 
 bool motor_link_get_wheel_velocities(float *left_rad_s, float *right_rad_s) {

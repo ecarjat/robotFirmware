@@ -122,6 +122,12 @@ void MotionController::setLqrParams(const lqr_params_t& lqr)
                  (double)lqr.u_limit);
 }
 
+void MotionController::setLqrEquilibrium(float thetaRef, float uEq)
+{
+    _thetaRef = thetaRef;
+    _uEq = uEq;
+}
+
 void MotionController::setRequestedMode(InnerLongMode mode)
 {
     if (mode != _requestedMode) {
@@ -169,13 +175,14 @@ void MotionController::updateBlendAlpha(float dt)
     }
 }
 
-float MotionController::computeLqrUSum(const StateEstimate& state, float vRef, float thetaRef)
+float MotionController::computeLqrUSumNm(const StateEstimate& state, float vRef, float thetaRef)
 {
     /* 4-state LQR: state_err = [x_err, v_err, theta_err, thetaDot]
      * Control law: u_sum = -K * state_err (negative feedback)
      *
-     * Note: x_err is set to 0 (no position control) by using K[0]=0 */
-    float x_err = 0.0f;  /* Position error disabled - use K[0]=0 */
+     * x_err uses a tracked reference (held when target velocity is zero,
+     * integrated when target velocity is non-zero). */
+    float x_err = state.x - _xRef;
     float v_err = state.xDot - vRef;
     float theta_err = state.theta - thetaRef;
     float thetaDot = state.thetaDot;
@@ -239,6 +246,10 @@ void MotionController::resetPidState()
     _lastGyroZ = 0.0f;
     _lastYawRateEnc = 0.0f;
     _lastYawRate = 0.0f;
+    _xRef = 0.0f;
+    _xRefValid = false;
+    _thetaRef = 0.0f;
+    _uEq = 0.0f;
 
     /* Reset LQR state */
     _alpha = (_requestedMode == InnerLongMode::LQR) ? 1.0f : 0.0f;
@@ -322,7 +333,7 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     }
 
     Command cmd{};
-    cmd.iq = {0.0f, 0.0f};
+    cmd.torque = {0.0f, 0.0f};
 
     /* ========== PID u_sum computation (always computed for blending) ========== */
 
@@ -444,14 +455,32 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
 
     /* ========== LQR u_sum computation ========== */
 
-    /* LQR uses theta_ref=0 (upright) and v_ref=_targetVel */
-    float uSumLqr = computeLqrUSum(state, _targetVel, 0.0f);
+    if (!_xRefValid) {
+        _xRef = state.x;
+        _xRefValid = true;
+    } else {
+        // Track position reference when a non-zero velocity command is present.
+        if (fabsf(_targetVel) > 1e-4f) {
+            _xRef += _targetVel * dtSeconds;
+        }
+    }
+
+    float thetaRef = _thetaRef;
+    if (_lqr.theta_ref_limit > 0.0f) {
+        thetaRef = clampf(thetaRef, _lqr.theta_ref_limit);
+    }
+    /* LQR uses theta_ref from equilibrium LUT and v_ref=_targetVel */
+    float uSumLqrNm = computeLqrUSumNm(state, _targetVel, thetaRef) + _uEq;
+    float uSumPidNm = 0.0f;
+    if (_motorKt > kGainEpsilon) {
+        uSumPidNm = uSumPid * _motorKt;
+    }
 
     /* ========== Blend PID and LQR based on alpha ========== */
 
     updateBlendAlpha(dtSeconds);
 
-    float uSum = (1.0f - _alpha) * uSumPid + _alpha * uSumLqr;
+    float uSum = (1.0f - _alpha) * uSumPidNm + _alpha * uSumLqrNm;
 
     /* Rate limiting on u_sum */
     if (_prevUSumValid && _lqr.du_limit > 0.0f) {
@@ -465,36 +494,48 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
 
     /* ========== Yaw differential (unchanged) ========== */
 
-    float uTurn = _turnGain * _teleopTurn - _yawDampGain * _lastYawRate;
+    float uTurnIq = _turnGain * _teleopTurn - _yawDampGain * _lastYawRate;
+    float uTurn = (_motorKt > kGainEpsilon) ? (uTurnIq * _motorKt) : 0.0f;
 
     /* ========== Mix u_sum and u_diff into wheel commands ========== */
 
     ControlOutput out;
-    out.iqLeft = uSum - uTurn;
-    out.iqRight = uSum + uTurn;
+    out.torqueLeftNm = uSum - uTurn;
+    out.torqueRightNm = uSum + uTurn;
 
-    /* Use LQR limit when in LQR mode, else use maxIq */
-    float effectiveLimit = (_alpha > 0.5f) ? _lqr.u_limit : maxIq;
-    if (effectiveLimit <= 0.0f) {
-        effectiveLimit = _maxWheelVelocity;
+    float maxTorque = 0.0f;
+    float maxTorqueIq = 0.0f;
+    if (_motorKt > kGainEpsilon && _iqMax > 0.0f) {
+        maxTorqueIq = _iqMax * _motorKt;
     }
+    if (_maxWheelTorque > 0.0f && maxTorqueIq > 0.0f) {
+        maxTorque = (maxTorqueIq < _maxWheelTorque) ? maxTorqueIq : _maxWheelTorque;
+    } else if (_maxWheelTorque > 0.0f) {
+        maxTorque = _maxWheelTorque;
+    } else if (maxTorqueIq > 0.0f) {
+        maxTorque = maxTorqueIq;
+    }
+
+    float lqrTorqueLimit = (_lqr.u_limit > 0.0f) ? _lqr.u_limit : 0.0f;
+
+    float effectiveLimit = (_alpha > 0.5f) ? lqrTorqueLimit : maxTorque;
 
     _lastSaturated = false;
     _diag.sat_left = false;
     _diag.sat_right = false;
     if (effectiveLimit > 0.0f) {
-        if (out.iqLeft > effectiveLimit) { out.iqLeft = effectiveLimit; _lastSaturated = true; _diag.sat_left = true; }
-        if (out.iqLeft < -effectiveLimit) { out.iqLeft = -effectiveLimit; _lastSaturated = true; _diag.sat_left = true; }
-        if (out.iqRight > effectiveLimit) { out.iqRight = effectiveLimit; _lastSaturated = true; _diag.sat_right = true; }
-        if (out.iqRight < -effectiveLimit) { out.iqRight = -effectiveLimit; _lastSaturated = true; _diag.sat_right = true; }
+        if (out.torqueLeftNm > effectiveLimit) { out.torqueLeftNm = effectiveLimit; _lastSaturated = true; _diag.sat_left = true; }
+        if (out.torqueLeftNm < -effectiveLimit) { out.torqueLeftNm = -effectiveLimit; _lastSaturated = true; _diag.sat_left = true; }
+        if (out.torqueRightNm > effectiveLimit) { out.torqueRightNm = effectiveLimit; _lastSaturated = true; _diag.sat_right = true; }
+        if (out.torqueRightNm < -effectiveLimit) { out.torqueRightNm = -effectiveLimit; _lastSaturated = true; _diag.sat_right = true; }
     }
 
     _lastPitchTarget = pitchTarget;
 
     /* ========== Record diagnostics ========== */
 
-    _diag.u_sum_pid = uSumPid;
-    _diag.u_sum_lqr = uSumLqr;
+    _diag.u_sum_pid = uSumPidNm;
+    _diag.u_sum_lqr = uSumLqrNm;
     _diag.u_sum_cmd = uSum;
     _diag.u_diff_cmd = uTurn;
     _diag.alpha = _alpha;
@@ -504,7 +545,7 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     _diag.active_mode = _activeMode;
     _diagValid = true;
 
-    cmd.iq = out;
+    cmd.torque = out;
     return cmd;
 }
 
@@ -515,17 +556,17 @@ MotionController::applyVelocitySlew(ControlOutput desired, float dt)
     float maxStep = _velocitySlewRate * dt;
 
     ControlOutput out;
-    float deltaLeft = desired.iqLeft - _prevVelocityLeft;
+    float deltaLeft = desired.torqueLeftNm - _prevVelocityLeft;
     if (deltaLeft > maxStep) deltaLeft = maxStep;
     if (deltaLeft < -maxStep) deltaLeft = -maxStep;
-    out.iqLeft = _prevVelocityLeft + deltaLeft;
+    out.torqueLeftNm = _prevVelocityLeft + deltaLeft;
 
-    float deltaRight = desired.iqRight - _prevVelocityRight;
+    float deltaRight = desired.torqueRightNm - _prevVelocityRight;
     if (deltaRight > maxStep) deltaRight = maxStep;
     if (deltaRight < -maxStep) deltaRight = -maxStep;
-    out.iqRight = _prevVelocityRight + deltaRight;
+    out.torqueRightNm = _prevVelocityRight + deltaRight;
 
-    _prevVelocityLeft = out.iqLeft;
-    _prevVelocityRight = out.iqRight;
+    _prevVelocityLeft = out.torqueLeftNm;
+    _prevVelocityRight = out.torqueRightNm;
     return out;
 }

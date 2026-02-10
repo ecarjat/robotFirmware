@@ -50,6 +50,10 @@ file(GLOB_RECURSE APP_C_SOURCES "app/*.c")
 file(GLOB_RECURSE APP_CPP_SOURCES "app/*.cpp")
 set(APP_SOURCES ${APP_C_SOURCES} ${APP_CPP_SOURCES})
 
+# Ensure newly added control sources are always captured by CMake.
+list(APPEND APP_SOURCES app/control/hip_behavior.c)
+list(APPEND APP_SOURCES app/control/lqr_lut.c)
+
 # Collect all .cpp files from control/ directory (including subdirectories)
 file(GLOB_RECURSE COMMON_CPP_SOURCES "common/*.c")
 

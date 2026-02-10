@@ -80,7 +80,7 @@ extern "C" {
  */
 
 #define PARAM_MAGIC             0x524F424FUL  /* 'ROBO' */
-#define PARAM_VERSION           8U
+#define PARAM_VERSION           9U
 #define PARAM_FLASH_BASE        0x080C0000UL
 #define PARAM_FLASH_SIZE        0x00020000UL  /* 128 KB */
 #define PARAM_FLASH_END         (PARAM_FLASH_BASE + PARAM_FLASH_SIZE)
@@ -141,8 +141,8 @@ typedef struct balance_gains {
  */
 typedef struct lqr_params {
     float K[4];             /* LQR gains: [K_x, K_v, K_theta, K_thetaDot] */
-    float u_limit;          /* Max |u_sum| (A) */
-    float du_limit;         /* Max rate of change |du_sum| per second (A/s) */
+    float u_limit;          /* Max |u_sum| (Nm) */
+    float du_limit;         /* Max rate of change |du_sum| per second (Nm/s) */
     float theta_ref_limit;  /* Max |theta_ref| (rad) */
     float v_ref_limit;      /* Max |v_ref| (m/s) */
     uint16_t engage_ramp_ms;    /* PID→LQR blend time (ms) */
@@ -198,6 +198,13 @@ typedef struct {
     /* Blackbox logging configuration */
     uint32_t log_fields_mask;        /* Bitmask of LOGF_* flags for conditional logging */
     uint16_t dump_seconds_default;   /* Default dump window in seconds (e.g., 30) */
+
+    /* Hip calibration / configuration */
+    float hip_left_zero_offset_rev;
+    float hip_right_zero_offset_rev;
+    int8_t hip_left_dir_sign;   /* +1 or -1 */
+    int8_t hip_right_dir_sign;  /* +1 or -1 */
+    uint8_t hip_reserved[2];
 
     /* Reserved for future use */
     uint8_t  reserved[6];

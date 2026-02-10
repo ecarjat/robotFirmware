@@ -7,6 +7,8 @@
 extern "C" {
 #endif
 
+#include "app_config.h"
+
 /**
  * @brief Compute wheel/ground height (hip to wheel distance, +Y down) from hip angle.
  *
@@ -32,6 +34,15 @@ bool hip_kinematics_height_from_theta(float theta_rad, float *height_m);
  * @return true if height is in range and interpolation succeeds.
  */
 bool hip_kinematics_theta_from_height(float height_m, float *theta_rad);
+
+/**
+ * @brief Get min/max height supported by the kinematics LUT.
+ *
+ * @param min_m Minimum height (meters).
+ * @param max_m Maximum height (meters).
+ * @return true if LUT is valid and range is available.
+ */
+bool hip_kinematics_get_height_range(float *min_m, float *max_m);
 
 #ifdef __cplusplus
 }

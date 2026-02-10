@@ -17,6 +17,7 @@ Purpose: onboard coding agents quickly and safely for this firmware repo.
   ```
 - Host-unit tests are wired up under `tests/` using Catch2 + CMake/CTest.
 - Build + run tests (host): `cmake --build tests/build` then `ctest --test-dir tests/build -V`.
+- After any code change, run the firmware build and host tests before reporting done.
 
 ## DMA and cache rules (H7)
 - DMA buffers must live in `.dma_buffer` (RAM_D1). Do not place DMA TX/RX buffers in `.bss`/DTCMRAM.
@@ -34,6 +35,7 @@ Purpose: onboard coding agents quickly and safely for this firmware repo.
 - Favor existing patterns in surrounding code (C-style in `app/`, minimal C++ in control).
 - Use `rg` for searching; avoid large refactors without confirming with the user.
 - Keep changes scoped; avoid touching CubeMX-generated files unless necessary.
+- Prefer Serena MCP for symbol-aware tasks: cross-file refactors/renames, API changes touching many files, and when needing precise symbol lookup/edit to avoid brittle text edits. Use shell tools for quick greps or single-file changes.
 
 ## Tests (host/unit)
 - Place unit tests in `tests/` and register them in `tests/CMakeLists.txt`.
