@@ -154,10 +154,10 @@
  * At K[2]=-400: pitch of 0.01 rad uses 4 Nm, leaving 1 Nm for velocity.
  * At K[1]=2: velocity of 0.5 m/s uses 1 Nm of braking torque.
  */
-#define LQR_K0_X         (-0.2f)    /* Position gain — NEGATIVE: lean back when drifting forward */
-#define LQR_K1_V         (-1.5f)    /* Velocity gain — NEGATIVE: forward torque when moving forward → lean back → decelerate */
-#define LQR_K2_THETA     (-400.0f)  /* Pitch angle gain (Nm/rad) — ~10x smaller to avoid saturation */
-#define LQR_K3_THETADOT  (-20.0f)   /* Pitch rate gain (Nm/(rad/s)) — ~10x smaller */
+#define LQR_K0_X         (-5.0f)    /* Position gain — NEGATIVE: lean back when drifting forward */
+#define LQR_K1_V         (-7.5f)    /* Velocity gain — NEGATIVE: forward torque when moving forward → lean back → decelerate */
+#define LQR_K2_THETA     (-400.0f)  /* Pitch angle gain (Nm/rad) */
+#define LQR_K3_THETADOT  (-24.0f)   /* Pitch rate gain (Nm/(rad/s)) */
 
 /* LQR limits */
 #define LQR_U_LIMIT            5.0f  /* Max |u_sum| (Nm) */
