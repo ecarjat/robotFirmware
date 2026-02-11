@@ -290,6 +290,7 @@ void MotionController::resetPidState()
     _activeMode = _requestedMode;
     _prevUSum = 0.0f;
     _prevUSumValid = false;
+    _velIntegral = 0.0f;
     _diag = InnerCtrlDiag{};
     _diagValid = false;
 }
