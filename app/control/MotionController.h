@@ -185,7 +185,11 @@ private:
     float _uEq = 0.0f;
     float _thetaRefFromPos = 0.0f;  /* Position-induced theta ref (cascaded) */
     float _lastXErr = 0.0f;         /* Last position error for diagnostics */
-    float _velIntegral = 0.0f;      /* Velocity error integral for LQI */
+    float _velIntegral = 0.0f;      /* Velocity error integral for LQI (unused) */
+    
+    /* Slow trim loop: integrates velocity error into pitch reference */
+    float _thetaTrim = 0.0f;        /* Pitch trim from velocity integrator (rad) */
+    
     InnerCtrlDiag _diag = {};
     bool _diagValid = false;
 

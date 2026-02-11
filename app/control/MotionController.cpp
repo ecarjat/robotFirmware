@@ -187,45 +187,74 @@ void MotionController::updateBlendAlpha(float dt)
 
 float MotionController::computeLqrUSumNm(const StateEstimate& state, float vRef, float thetaRef)
 {
-    /* Direct full-state feedback:
+    /*
+     * Three-layer architecture (per second opinion feedback):
      *
-     *   u = -(K[0]*x_err + K[1]*v_err + K[2]*theta_err + K[3]*thetaDot)
+     * 1. OUTER POSITION LOOP (optional, slow):
+     *    v_ref = -k_x * x_err  (saturated)
      *
-     * K[2]/K[3] are reduced ~10x from original LQR so the controller doesn't
-     * bang-bang on pitch alone, leaving torque budget for velocity feedback.
+     * 2. SLOW TRIM LOOP:
+     *    θ_trim integrates (v_ref - v) to eliminate velocity drift
+     *    This works because changing velocity requires changing lean (non-minimum phase)
      *
-     * K[0]: position (disabled when 0)
-     * K[1]: velocity feedback, direct to torque
-     * K[2]: pitch angle (negative — forward lean → positive torque)
-     * K[3]: pitch rate (negative — damping)
+     * 3. FAST INNER LQR:
+     *    u = -K[1]*(v - v_ref) - K[2]*(θ - θ_ref) - K[3]*θ̇
+     *    where θ_ref = θ_eq + θ_trim
      */
+    
+    const float dt = _controlDt;
+    
+    /* === 1. OUTER POSITION LOOP === */
+    /* Generate velocity reference from position error */
     float x_err = state.x - _xRef;
-    float v_err = state.xDot - vRef;
-    float theta_err = state.theta - thetaRef;
-    float thetaDot = state.thetaDot;
-
-    /* Store for diagnostics */
     _lastXErr = x_err;
-    _thetaRefFromPos = 0.0f;
-
-    float u_sum = 0.0f;
-
-    /* Position term (optional, clamped to avoid dominating torque budget) */
+    
+    /* K[0] now acts as position→velocity gain (not position→torque) */
+    constexpr float v_ref_max = 1.0f;  /* Max velocity setpoint (m/s) */
+    float v_ref_from_pos = 0.0f;
     if (fabsf(_lqr.K[0]) > kGainEpsilon) {
-        float u_pos = -_lqr.K[0] * x_err;
-        /* Clamp position contribution to leave budget for pitch and velocity */
-        float pos_limit = _lqr.u_limit * 0.4f;  /* max 40% of torque budget */
-        u_sum += clampf(u_pos, pos_limit);
+        /* K[0] is negative, x_err positive when ahead of target → v_ref negative (go back) */
+        v_ref_from_pos = _lqr.K[0] * x_err;  /* Already negative gain */
+        v_ref_from_pos = clampf(v_ref_from_pos, v_ref_max);
     }
-
-    /* Velocity term (unclamped — needs full authority to lean for braking) */
+    
+    /* Combine with teleop velocity reference */
+    float v_ref_total = vRef + v_ref_from_pos;
+    v_ref_total = clampf(v_ref_total, v_ref_max);
+    
+    /* === 2. SLOW TRIM LOOP === */
+    /* Integrate velocity error into pitch trim (leaky integrator with anti-windup) */
+    constexpr float k_trim = 0.03f;      /* Trim integrator gain (rad per (m/s)*s) — slow! */
+    constexpr float k_leak = 0.005f;     /* Leak rate (1/s) — prevents memory forever */
+    constexpr float theta_trim_max = 0.08f;  /* Max trim ~4.6° */
+    
+    float v_err = v_ref_total - state.xDot;  /* (v_ref - v): positive when going too slow */
+    
+    /* Leaky integration: trim += ki * v_err * dt - leak * trim * dt */
+    _thetaTrim += k_trim * v_err * dt;
+    _thetaTrim -= k_leak * _thetaTrim * dt;
+    _thetaTrim = clampf(_thetaTrim, theta_trim_max);
+    
+    /* Final theta reference = equilibrium + trim */
+    float theta_ref_final = thetaRef + _thetaTrim;
+    theta_ref_final = clampf(theta_ref_final, _lqr.theta_ref_limit);
+    _thetaRefFromPos = _thetaTrim;  /* For diagnostics */
+    
+    /* === 3. FAST INNER LQR === */
+    /* u = -K[1]*(v - v_ref) - K[2]*(θ - θ_ref) - K[3]*θ̇ */
+    float theta_err = state.theta - theta_ref_final;
+    float thetaDot = state.thetaDot;
+    
+    float u_sum = 0.0f;
+    
+    /* Velocity term */
     if (fabsf(_lqr.K[1]) > kGainEpsilon) {
-        u_sum -= _lqr.K[1] * v_err;
+        u_sum -= _lqr.K[1] * (state.xDot - v_ref_total);
     }
-
-    /* Pitch terms (unclamped — balance is priority) */
+    
+    /* Pitch terms (balance is priority) */
     u_sum -= _lqr.K[2] * theta_err + _lqr.K[3] * thetaDot;
-
+    
     return u_sum;
 }
 
@@ -291,6 +320,7 @@ void MotionController::resetPidState()
     _prevUSum = 0.0f;
     _prevUSumValid = false;
     _velIntegral = 0.0f;
+    _thetaTrim = 0.0f;
     _diag = InnerCtrlDiag{};
     _diagValid = false;
 }
