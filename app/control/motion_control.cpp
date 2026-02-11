@@ -662,7 +662,9 @@ void motion_control_tick(uint32_t now_ms)
             if (hip_count > 0) {
                 hip_theta /= (float)hip_count;
                 float K_lut[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                if (lqr_lut_eval(hip_theta, K_lut)) {
+                float theta_eq = 0.0f;
+                float u_eq = 0.0f;
+                if (lqr_lut_eval_full(hip_theta, K_lut, &theta_eq, &u_eq)) {
                     lqr_params_t lqr = g_robot_params.lqr;
                     /* Cascaded architecture: K[0] is position-to-theta gain (Kx).
                      * Keep K[0] from config (not LUT) for now — LUT was tuned
@@ -673,6 +675,8 @@ void motion_control_tick(uint32_t now_ms)
                         lqr.K[i] = K_lut[i];
                     }
                     s_controller.setLqrParams(lqr);
+                    /* Apply equilibrium pitch and feedforward torque from LUT */
+                    s_controller.setLqrEquilibrium(theta_eq, u_eq);
                 }
             }
         }
