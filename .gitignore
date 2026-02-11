@@ -11,3 +11,5 @@ build/
 .serena/memories/build-commands.md
 .vscode/launch.json
 .serena/serena_config.yml
+esp32-arduino
+pysfoc

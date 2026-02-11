@@ -1,0 +1,1 @@
+Project note: DMA buffers must live in the `.dma_buffer` section (RAM_D1) on H7. Do not place DMA TX/RX buffers in `.bss`/DTCMRAM. Ensure new DMA-related buffers are declared with `__attribute__((section(".dma_buffer"), aligned(32)))` (or a project macro if added later) and clean/invalidate D-cache as appropriate.

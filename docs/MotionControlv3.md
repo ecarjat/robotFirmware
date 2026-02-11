@@ -64,6 +64,25 @@ If hip motion changes the body pitch, a feedforward compensation term should be 
 
 ## 6. Control structure (block view)
 
+```text
+            +--------------------+
+            |  Motion Modes /    |
+            |  Hip Behavior SM   |
+            +---------+----------+
+                      |
+                      v
+            +--------------------+
+IMU + Hip   |  Hip Control Loop  |  Hip encoder + limits
+state ----> |  (height + impedance) -----> Hip CAN commands
+            +---------+----------+
+                      |
+                      v
+            +--------------------+
+            |  Wheel Controller  |  Wheel IMU + speed
+            |  (balance + FF)    |-----> Wheel CAN commands
+            +--------------------+
+```
+
 ### Wheel loop (existing)
 - Inputs: IMU pitch, pitch rate, wheel speed
 - Output: wheel torque
@@ -91,6 +110,7 @@ Log at minimum:
 - Hip torque/position command, hip measured position/velocity.
 - Body height estimate, IMU pitch.
 - State machine mode and phase transitions.
+- Jump phase progress (0-100%).
 
 Fault conditions:
 - Hip motor communication loss.
@@ -218,6 +238,9 @@ Add or extend a shared control struct:
   - `vel_ff_rev_s`
   - `torque_ff_nm`
 
+Add to telemetry (robot protocol v3):
+- `hip_phase_progress_pct` (0-100) indicating jump phase completion.
+
 ### 13.3 Units and conversions
 - Encoder input:
   - Use output shaft encoder (2ES68) in revolutions.
@@ -308,18 +331,30 @@ Transitions:
 - `FLIGHT -> LANDING` on IMU vertical accel or contact detection.
 - `LANDING -> NORMAL` after settling (e.g., 200 ms).
 
-### 13.9 Telemetry and logging
+### 13.9 Tuning guide (impedance + jump)
+Start with conservative stiffness/damping and increase until the body tracks
+height without oscillation:
+- Increase `stiffness_n_m` until tracking error is acceptable.
+- Increase `damping_n_s_m` to suppress oscillation on landing.
+- If jump impulse feels sluggish, increase `HIP_IMPULSE_RATE_MPS` gradually.
+- If landing feels harsh, increase `HIP_LANDING_DAMPING_N_S_M` before raising
+  `HIP_LANDING_STIFFNESS_N_M`.
+- Keep wheel loop limits conservative during impulse/flight and relax only
+  after reliable landing detection.
+
+### 13.10 Telemetry and logging
 Telemetry fields required:
 - `hip_pos_rev`, `hip_vel_rev_s`, `hip_torque_nm`
 - `height_m`, `height_dot_m_s`
 - `hip_mode`, `hip_fault_flags`
 - `can_rx_age_ms` per hip
+- `hip_fault_flags` includes per-motor stall flags.
 
 Logging rate:
 - Hip loop: 100-200 Hz
 - State changes: log event stamps
 
-### 13.10 CAN configuration
+### 13.11 CAN configuration
 - Node IDs:
   - `hip_left = 0x03`, `hip_right = 0x04`
 - CAN Simple ID:
@@ -352,7 +387,7 @@ Startup sequence (defaults):
    - Else hold current height using `Set_Input_Pos`.
 7) Start telemetry polling at **50 Hz**; start heartbeat at **5–10 Hz**.
 
-### 13.11 Test plan (minimum)
+### 13.12 Test plan (minimum)
 Unit tests:
 - `hip_kinematics_height_from_theta` at limits and midpoints.
 - Inverse kinematics (when implemented) round-trip consistency.
