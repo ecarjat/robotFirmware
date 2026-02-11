@@ -115,11 +115,21 @@ void MotionController::setBalanceGains(const balance_gains_t& gains)
 
 void MotionController::setLqrParams(const lqr_params_t& lqr)
 {
+    /* Only log when gains actually change (avoids spamming every LUT update) */
+    bool changed = false;
+    for (int i = 0; i < 4; ++i) {
+        if (_lqr.K[i] != lqr.K[i]) { changed = true; break; }
+    }
+    if (_lqr.u_limit != lqr.u_limit) changed = true;
+
     _lqr = lqr;
-    APP_LOG_INFO("LQR params: K=[%.2f,%.2f,%.2f,%.2f] u_lim=%.1f",
-                 (double)lqr.K[0], (double)lqr.K[1],
-                 (double)lqr.K[2], (double)lqr.K[3],
-                 (double)lqr.u_limit);
+
+    if (changed) {
+        APP_LOG_INFO("LQR params: K=[%.2f,%.2f,%.2f,%.2f] u_lim=%.1f",
+                     (double)lqr.K[0], (double)lqr.K[1],
+                     (double)lqr.K[2], (double)lqr.K[3],
+                     (double)lqr.u_limit);
+    }
 }
 
 void MotionController::setLqrEquilibrium(float thetaRef, float uEq)
@@ -177,20 +187,44 @@ void MotionController::updateBlendAlpha(float dt)
 
 float MotionController::computeLqrUSumNm(const StateEstimate& state, float vRef, float thetaRef)
 {
-    /* 4-state LQR: state_err = [x_err, v_err, theta_err, thetaDot]
-     * Control law: u_sum = -K * state_err (negative feedback)
+    /* Direct full-state feedback:
      *
-     * x_err uses a tracked reference (held when target velocity is zero,
-     * integrated when target velocity is non-zero). */
+     *   u = -(K[0]*x_err + K[1]*v_err + K[2]*theta_err + K[3]*thetaDot)
+     *
+     * K[2]/K[3] are reduced ~10x from original LQR so the controller doesn't
+     * bang-bang on pitch alone, leaving torque budget for velocity feedback.
+     *
+     * K[0]: position (disabled when 0)
+     * K[1]: velocity feedback, direct to torque
+     * K[2]: pitch angle (negative — forward lean → positive torque)
+     * K[3]: pitch rate (negative — damping)
+     */
     float x_err = state.x - _xRef;
     float v_err = state.xDot - vRef;
     float theta_err = state.theta - thetaRef;
     float thetaDot = state.thetaDot;
 
-    float u_sum = -(_lqr.K[0] * x_err
-                  + _lqr.K[1] * v_err
-                  + _lqr.K[2] * theta_err
-                  + _lqr.K[3] * thetaDot);
+    /* Store for diagnostics */
+    _lastXErr = x_err;
+    _thetaRefFromPos = 0.0f;
+
+    float u_sum = 0.0f;
+
+    /* Position term (optional, clamped to avoid dominating torque budget) */
+    if (fabsf(_lqr.K[0]) > kGainEpsilon) {
+        float u_pos = -_lqr.K[0] * x_err;
+        /* Clamp position contribution to leave budget for pitch and velocity */
+        float pos_limit = _lqr.u_limit * 0.4f;  /* max 40% of torque budget */
+        u_sum += clampf(u_pos, pos_limit);
+    }
+
+    /* Velocity term (unclamped — needs full authority to lean for braking) */
+    if (fabsf(_lqr.K[1]) > kGainEpsilon) {
+        u_sum -= _lqr.K[1] * v_err;
+    }
+
+    /* Pitch terms (unclamped — balance is priority) */
+    u_sum -= _lqr.K[2] * theta_err + _lqr.K[3] * thetaDot;
 
     return u_sum;
 }
@@ -539,6 +573,8 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     _diag.u_sum_cmd = uSum;
     _diag.u_diff_cmd = uTurn;
     _diag.alpha = _alpha;
+    _diag.theta_ref_pos = _thetaRefFromPos;
+    _diag.x_err = _lastXErr;
     _diag.fallback_to_pid = false;
     _diag.cross_antiwindup_active = crossAntiWindupActive;
     _diag.requested_mode = _requestedMode;

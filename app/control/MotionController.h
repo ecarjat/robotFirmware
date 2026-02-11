@@ -23,6 +23,8 @@ struct InnerCtrlDiag {
     float u_sum_lqr;      /**< LQR-computed u_sum before blend (Nm) */
     float u_diff_cmd;     /**< Yaw loop differential output (Nm) */
     float alpha;          /**< Current blend factor (0=PID, 1=LQR) */
+    float theta_ref_pos;  /**< Position-induced theta reference (rad) */
+    float x_err;          /**< Position error (m) */
     bool sat_left;        /**< Left wheel saturated flag */
     bool sat_right;       /**< Right wheel saturated flag */
     bool fallback_to_pid; /**< Forced fallback to PID due to safety */
@@ -181,6 +183,8 @@ private:
     bool _xRefValid = false;
     float _thetaRef = 0.0f;
     float _uEq = 0.0f;
+    float _thetaRefFromPos = 0.0f;  /* Position-induced theta ref (cascaded) */
+    float _lastXErr = 0.0f;         /* Last position error for diagnostics */
     InnerCtrlDiag _diag = {};
     bool _diagValid = false;
 

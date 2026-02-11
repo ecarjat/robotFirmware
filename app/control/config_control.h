@@ -142,20 +142,28 @@
 #define VELOCITY_SLEW_RATE_RAD_PER_S2 20.0f
 #define PARAM_MAX_TURN_RATE 2.0f
 
-/* ======== LQR Inner Loop Configuration ======== */
+/* ======== LQR Direct Full-State Controller ======== */
 
-/* Default LQR gains (4-state: [x_err, v_err, theta_err, thetaDot])
- * These are placeholder gains - tune on real hardware */
-#define LQR_K0_X         0.0f      /* Position error gain (set to 0 to disable) */
-#define LQR_K1_V         0.3f      /* Velocity error gain */
-#define LQR_K2_THETA     2.5f      /* Pitch angle gain */
-#define LQR_K3_THETADOT  0.8f      /* Pitch rate gain */
+/* Direct full-state feedback:
+ *   u = -(K[0]*x_err + K[1]*v_err + K[2]*theta_err + K[3]*thetaDot)
+ *
+ * K[2]/K[3] deliberately reduced ~10x from original LQR (which had
+ * K[2]=-4187.5, K[3]=-165.1) to avoid bang-bang saturation at ±5 Nm.
+ * This leaves torque headroom for velocity feedback (K[1]).
+ *
+ * At K[2]=-400: pitch of 0.01 rad uses 4 Nm, leaving 1 Nm for velocity.
+ * At K[1]=2: velocity of 0.5 m/s uses 1 Nm of braking torque.
+ */
+#define LQR_K0_X         (-0.2f)    /* Position gain — NEGATIVE: lean back when drifting forward */
+#define LQR_K1_V         (-1.5f)    /* Velocity gain — NEGATIVE: forward torque when moving forward → lean back → decelerate */
+#define LQR_K2_THETA     (-400.0f)  /* Pitch angle gain (Nm/rad) — ~10x smaller to avoid saturation */
+#define LQR_K3_THETADOT  (-20.0f)   /* Pitch rate gain (Nm/(rad/s)) — ~10x smaller */
 
 /* LQR limits */
 #define LQR_U_LIMIT            5.0f  /* Max |u_sum| (Nm) */
 #define LQR_DU_LIMIT           10.0f   /* Max |du_sum| per second (Nm/s) */
-#define LQR_THETA_REF_LIMIT    0.15f    /* Max |theta_ref| (rad) */
-#define LQR_V_REF_LIMIT        0.6f     /* Max |v_ref| (m/s) */
+#define LQR_THETA_REF_LIMIT    0.01f    /* Max |theta_ref| from vel loop (rad, ~0.57°) */
+#define LQR_V_REF_LIMIT        2.0f     /* Max |v_ref| from position loop (m/s) */
 
 /* Mode switching ramp times */
 #define LQR_ENGAGE_RAMP_MS     200U     /* PID→LQR blend time (ms) */

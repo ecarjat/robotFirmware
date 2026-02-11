@@ -664,7 +664,12 @@ void motion_control_tick(uint32_t now_ms)
                 float K_lut[4] = {0.0f, 0.0f, 0.0f, 0.0f};
                 if (lqr_lut_eval(hip_theta, K_lut)) {
                     lqr_params_t lqr = g_robot_params.lqr;
-                    for (int i = 0; i < 4; ++i) {
+                    /* Cascaded architecture: K[0] is position-to-theta gain (Kx).
+                     * Keep K[0] from config (not LUT) for now — LUT was tuned
+                     * for direct 4-state where K[0] was position-to-torque.
+                     * Inner loop gains K[1,2,3] can still be gain-scheduled. */
+                    /* lqr.K[0] = K_lut[0]; -- skip: keep config value */
+                    for (int i = 1; i < 4; ++i) {
                         lqr.K[i] = K_lut[i];
                     }
                     s_controller.setLqrParams(lqr);
