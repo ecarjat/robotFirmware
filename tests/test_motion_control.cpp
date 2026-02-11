@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <cmath>
+#include <cstring>
 
 extern "C" {
 #include "motion_control.h"
@@ -20,6 +22,9 @@ void motor_link_fake_get_last_torque(float *left_nm, float *right_nm, float *max
 }
 
 namespace {
+constexpr float kPi = 3.14159265358979323846f;
+constexpr uint8_t kHipCmdGetEncoder = 0x09U;
+
 void reset_params()
 {
     g_robot_params = {};
@@ -61,6 +66,27 @@ void prime_imu(uint32_t now_ms)
     sample.gyro[2] = 0;
     sample.timestamp_ms = now_ms;
     imu_fake_set_bmi_sample(&sample, now_ms);
+}
+
+float rev_from_rad(float theta_rad)
+{
+    return theta_rad / (2.0f * kPi);
+}
+
+void feed_hip_encoder(float left_theta_rad, float right_theta_rad, uint32_t now_ms)
+{
+    auto feed_one = [now_ms](uint8_t node_id, float theta_rad) {
+        uint8_t payload[8] = {0};
+        const float pos_rev = rev_from_rad(theta_rad);
+        const float vel_rev_s = 0.0f;
+        std::memcpy(&payload[0], &pos_rev, sizeof(pos_rev));
+        std::memcpy(&payload[4], &vel_rev_s, sizeof(vel_rev_s));
+        const uint32_t id = ((uint32_t)node_id << 5) | kHipCmdGetEncoder;
+        (void)hip_control_on_can_rx(id, payload, sizeof(payload), now_ms);
+    };
+
+    feed_one(HIP_CAN_NODE_LEFT, left_theta_rad);
+    feed_one(HIP_CAN_NODE_RIGHT, right_theta_rad);
 }
 } // namespace
 
@@ -179,4 +205,65 @@ TEST_CASE("motion_control scales wheel iq during jump phases", "[motion_control]
     CHECK(torque_impulse == Catch::Approx(torque_crouch * HIP_WHEEL_SCALE_IMPULSE).margin(0.05f));
     CHECK(torque_flight == Catch::Approx(torque_crouch * HIP_WHEEL_SCALE_FLIGHT).margin(0.05f));
     CHECK(torque_landing == Catch::Approx(torque_crouch * HIP_WHEEL_SCALE_LANDING).margin(0.05f));
+}
+
+TEST_CASE("motion_control applies LUT equilibrium to LQR output in tick path",
+          "[motion_control][lqr][hip]")
+{
+    setup_balance_params();
+    g_robot_params.lqr.default_mode = 1U;
+    g_robot_params.lqr.engage_ramp_ms = 0U;
+    g_robot_params.lqr.disengage_ramp_ms = 0U;
+    g_robot_params.lqr.u_limit = 200.0f;
+    g_robot_params.lqr.du_limit = 0.0f;
+    g_robot_params.lqr.theta_ref_limit = 1.0f;
+    g_robot_params.lqr.v_ref_limit = 2.0f;
+    g_robot_params.lqr.K[0] = 0.0f;
+    g_robot_params.lqr.K[1] = -35.0f;
+    g_robot_params.lqr.K[2] = -400.0f;
+    g_robot_params.lqr.K[3] = -24.0f;
+
+    motion_control_init();
+    motion_control_apply_params();
+    motion_control_set_mode(MOTION_MODE_BALANCING);
+    motion_control_test_clear_overrides();
+
+    motion_control_estimate_t est{};
+    est.theta_rad = 0.0f;
+    est.theta_dot = 0.0f;
+    est.x_m = 0.0f;
+    est.x_dot_mps = 0.0f;
+    est.gyro_bias = 0.0f;
+    est.valid = 1U;
+    motion_control_test_set_estimate(&est);
+    motor_link_fake_set_velocities(0.0f, 0.0f);
+
+    auto tick = [](uint32_t now_ms) {
+        prime_imu(now_ms);
+        motion_control_tick(now_ms);
+    };
+
+    /* Bring hip control startup to closed-loop stage first. */
+    tick(0U);
+    tick(10U);
+    tick(20U);
+
+    /* Low hip angle should map to negative theta_eq and positive wheel torque. */
+    feed_hip_encoder(-0.27f, -0.27f, 25U);
+    tick(40U);
+    tick(60U);
+    tick(80U);
+    REQUIRE(motion_control_get_inner_mode() == 1U);
+    float torque_low = 0.0f;
+    motor_link_fake_get_last_torque(&torque_low, nullptr, nullptr);
+
+    /* Higher hip angle should map to different theta_eq and shift output torque. */
+    feed_hip_encoder(0.16f, 0.16f, 85U);
+    tick(100U);
+    tick(120U);
+    tick(140U);
+    float torque_high = 0.0f;
+    motor_link_fake_get_last_torque(&torque_high, nullptr, nullptr);
+
+    CHECK(std::fabs(torque_low - torque_high) > 10.0f);
 }

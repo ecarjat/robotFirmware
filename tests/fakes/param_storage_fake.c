@@ -2,6 +2,7 @@
 
 bool g_param_can_save = true;
 int g_param_save_calls = 0;
+int g_param_save_rc = PARAM_OK;
 
 bool param_storage_can_save(void)
 {
@@ -12,7 +13,7 @@ int param_storage_save(const robot_params_t *params)
 {
     (void)params;
     g_param_save_calls++;
-    return PARAM_OK;
+    return g_param_save_rc;
 }
 
 void param_storage_get_defaults(robot_params_t *params)

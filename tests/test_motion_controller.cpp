@@ -60,3 +60,66 @@ TEST_CASE("MotionController computeLqrUSumNm uses gains", "[motion_controller]")
     // u = -(2*0.5 + 3*0.2 + 4*(-0.1)) = -(1.0 + 0.6 -0.4) = -1.2
     CHECK(u == Catch::Approx(-1.2f));
 }
+
+TEST_CASE("MotionController computeLqrUSumNm respects v_ref_limit", "[motion_controller]")
+{
+    RobotParams params;
+    MotionController controller(params);
+    controller.resetPidState();
+
+    lqr_params_t lqr{};
+    lqr.K[0] = 1.0f;   /* x_err -> v_ref */
+    lqr.K[1] = 1.0f;   /* v_err term */
+    lqr.K[2] = 0.0f;
+    lqr.K[3] = 0.0f;
+    lqr.theta_ref_limit = 1.0f;
+    lqr.v_ref_limit = 0.2f;
+    controller.setLqrParams(lqr);
+
+    StateEstimate state{};
+    state.x = 10.0f;
+    state.xDot = 0.0f;
+    float limited_u = controller.test_computeLqrUSumNm(state, 0.0f, 0.0f);
+    CHECK(limited_u == Catch::Approx(0.2f));
+
+    controller.resetPidState();
+    lqr.v_ref_limit = 2.0f;
+    controller.setLqrParams(lqr);
+    float wider_limit_u = controller.test_computeLqrUSumNm(state, 0.0f, 0.0f);
+    CHECK(wider_limit_u == Catch::Approx(2.0f));
+}
+
+TEST_CASE("MotionController trim loop clamps under sustained velocity error", "[motion_controller]")
+{
+    RobotParams params;
+    MotionController controller(params);
+    controller.resetPidState();
+    controller.setControlDt(1.0f);
+
+    lqr_params_t lqr{};
+    lqr.K[0] = 0.0f;
+    lqr.K[1] = 0.0f;
+    lqr.K[2] = 1.0f;   /* expose theta trim as torque output */
+    lqr.K[3] = 0.0f;
+    lqr.theta_ref_limit = 1.0f;
+    lqr.v_ref_limit = 10.0f;
+    controller.setLqrParams(lqr);
+
+    StateEstimate state{};
+    state.x = 0.0f;
+    state.theta = 0.0f;
+    state.thetaDot = 0.0f;
+    state.xDot = -10.0f;
+
+    float u = 0.0f;
+    for (int i = 0; i < 8; ++i) {
+        u = controller.test_computeLqrUSumNm(state, 10.0f, 0.0f);
+    }
+    CHECK(u == Catch::Approx(0.08f).margin(0.002f));
+
+    state.xDot = 10.0f;
+    for (int i = 0; i < 8; ++i) {
+        u = controller.test_computeLqrUSumNm(state, -10.0f, 0.0f);
+    }
+    CHECK(u == Catch::Approx(-0.08f).margin(0.002f));
+}
