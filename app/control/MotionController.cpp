@@ -210,7 +210,8 @@ float MotionController::computeLqrUSumNm(const StateEstimate& state, float vRef,
     _lastXErr = x_err;
     
     /* K[0] now acts as position→velocity gain (not position→torque) */
-    constexpr float v_ref_max = 1.0f;  /* Max velocity setpoint (m/s) */
+    /* Use configured v_ref_limit; 0 disables clamping */
+    const float v_ref_max = (_lqr.v_ref_limit > 0.0f) ? _lqr.v_ref_limit : 100.0f;
     float v_ref_from_pos = 0.0f;
     if (fabsf(_lqr.K[0]) > kGainEpsilon) {
         /* K[0] is negative, x_err positive when ahead of target → v_ref negative (go back) */
