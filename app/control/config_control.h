@@ -37,15 +37,15 @@
 
 /* EKF noise tuning */
 #define EKF_Q_THETA      1e-4f
-#define EKF_Q_THETA_DOT  5e-3f
+#define EKF_Q_THETA_DOT  1e-2f
 #define EKF_Q_X          1e-2f
 #define EKF_Q_X_DOT      5e-2f
-#define EKF_Q_BIAS       1e-5f
+#define EKF_Q_BIAS       1e-6f
 #define EKF_Q_YAW        1e-3f   /* Yaw angle process noise */
 #define EKF_Q_YAW_BIAS   1e-6f   /* Yaw gyro bias random walk */
 
-#define EKF_R_THETA_ACC     4e-3f
-#define EKF_R_V_ENC         5e-2f
+#define EKF_R_THETA_ACC     2e-1f
+#define EKF_R_V_ENC         2e-1f
 #define EKF_R_X_POS         1e-3f
 #define EKF_R_YAW_RATE_ENC  1e-2f  /* Encoder differential yaw rate noise */
 
