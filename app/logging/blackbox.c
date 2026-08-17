@@ -1,6 +1,7 @@
 #include "blackbox.h"
 
 #include "app_config.h"
+#include "app_log_macros.h"
 #include "crc32.h"
 #include "led_status.h"
 #include "main.h"
@@ -9,6 +10,13 @@
 #include "config_control.h"
 #include <limits.h>
 #include <string.h>
+
+#if defined(APP_CONFIG_HOST)
+#define BLACKBOX_DMA_BUFFER __attribute__((aligned(32)))
+#else
+#define BLACKBOX_DMA_BUFFER \
+  __attribute__((section(".dma_buffer"), aligned(32)))
+#endif
 
 /*
  * Lock-free SPSC (Single Producer Single Consumer) Queue
@@ -29,7 +37,7 @@
 
 /* RAM queue for log records (in .dma_buffer section) */
 static uint8_t s_log_queue[LOG_RAM_QUEUE_SIZE]
-    __attribute__((section(".dma_buffer"), aligned(32)));
+    BLACKBOX_DMA_BUFFER;
 
 /* SPSC queue indices - producer writes head, consumer writes tail */
 static volatile uint32_t s_queue_head = 0;  /* Written by producer only */
@@ -42,6 +50,22 @@ static uint32_t s_write_addr_at_boot = LOG_RING_START;
 static uint32_t s_wrap_count = 0;
 static volatile uint32_t s_next_seq = 0;
 static uint32_t s_total_records = 0;
+
+/* Deferred dump capture boundary. All fields are accessed from main-loop
+ * logging code except retention_hold, which is also read by the producer. */
+static struct {
+  bool active;
+  bool target_consumed;
+  bool ready;
+  bool failed;
+  bool protection_enabled;
+  volatile bool retention_hold;
+  uint32_t target_end_seq;
+  uint32_t end_addr;
+  uint32_t records_available;
+  uint32_t post_target_records;
+  uint32_t allowed_post_target_records;
+} s_capture = {0};
 
 /* Erase state */
 static uint32_t s_next_erase_addr = LOG_RING_START;
@@ -68,7 +92,7 @@ static log_meta_save_state_t s_meta_save_state = LOG_META_SAVE_IDLE;
 static log_meta_op_t s_meta_op_inflight = LOG_META_OP_NONE;
 static uint32_t s_meta_slot_addr = LOG_META_SLOT0;
 static LogMeta s_meta_pending
-    __attribute__((section(".dma_buffer"), aligned(32)));
+    BLACKBOX_DMA_BUFFER;
 
 /* Statistics */
 static uint32_t s_qspi_write_errors = 0;
@@ -80,7 +104,7 @@ static uint16_t s_log_rate_hz = 0U;
 
 /* Write chunk buffer (in .dma_buffer section) */
 static uint8_t s_write_chunk[LOG_WRITE_CHUNK_SIZE]
-    __attribute__((section(".dma_buffer"), aligned(32)));
+    BLACKBOX_DMA_BUFFER;
 static size_t s_write_chunk_len = 0;
 
 typedef enum {
@@ -109,6 +133,9 @@ static uint16_t log_rate_from_params(const robot_params_t *params);
 static void log_meta_tick(qspi_w25q64_async_state_t async_state);
 static bool log_erase_ahead_ready(void);
 static void log_note_qspi_error(void);
+static bool log_write_chunk_contains_seq(uint32_t seq);
+static void log_capture_note_write_error(void);
+static void log_capture_note_write_complete(void);
 
 void log_init(const robot_params_t *params) {
   if (s_initialized) {
@@ -160,8 +187,10 @@ void log_push_record(const LogRecord *rec) {
   if (!s_initialized || rec == NULL) {
     return;
   }
-  /* Pause logging during dumps to avoid ring overwrite. */
-  if (log_is_dumping()) {
+  /* Export and retention-hold states protect the dump source. Capture
+   * preparation deliberately leaves logging enabled. */
+  if (log_dump_blocks_logging() || s_capture.retention_hold) {
+    s_dropped_records++;
     return;
   }
 
@@ -214,6 +243,7 @@ void log_writer_tick(void) {
   if (s_write_state != LOG_WRITE_IDLE) {
     if (async_state == QSPI_W25Q64_ASYNC_ERROR) {
       log_note_qspi_error();
+      log_capture_note_write_error();
       s_write_chunk_len = 0;
       s_write_chunk_first_len = 0;
       s_write_chunk_second_len = 0;
@@ -224,6 +254,7 @@ void log_writer_tick(void) {
                 LOG_RING_START, s_write_chunk + s_write_chunk_first_len,
                 s_write_chunk_second_len)) {
           log_note_qspi_error();
+          log_capture_note_write_error();
           s_write_chunk_len = 0;
           s_write_chunk_first_len = 0;
           s_write_chunk_second_len = 0;
@@ -236,6 +267,7 @@ void log_writer_tick(void) {
         /* Count records once the full chunk is successfully written. */
         s_total_records += (uint32_t)(s_write_chunk_len / LOG_RECORD_SIZE);
         log_advance_write_addr_after_chunk();
+        log_capture_note_write_complete();
         s_write_chunk_len = 0;
         s_write_chunk_first_len = 0;
         s_write_chunk_second_len = 0;
@@ -250,7 +282,7 @@ void log_writer_tick(void) {
     return;
   }
 
-  if (log_is_dumping()) {
+  if (log_dump_blocks_logging() || s_capture.retention_hold) {
     return;
   }
 
@@ -278,6 +310,35 @@ void log_writer_tick(void) {
   uint32_t tail = s_queue_tail;
 
   while (1) {
+    if (s_capture.active && !s_capture.ready &&
+        s_capture.target_consumed) {
+      /* The exact capture boundary is in the current partial chunk. Flush it
+       * before accepting any record that arrived after the request. */
+      if (s_write_chunk_len > 0U) {
+        if (log_flush_write_chunk()) {
+          s_queue_tail = tail;
+          return;
+        }
+      }
+      break;
+    }
+
+    if (s_capture.protection_enabled &&
+        s_capture.post_target_records >=
+            s_capture.allowed_post_target_records) {
+      /* Commit any already-buffered records up to the retention boundary,
+       * then retain the captured window by refusing later producer records. */
+      if (s_write_chunk_len > 0U) {
+        if (log_flush_write_chunk()) {
+          s_queue_tail = tail;
+          return;
+        }
+      }
+      s_queue_tail = tail;
+      s_capture.retention_hold = true;
+      return;
+    }
+
     /* Read head with barrier to ensure we see producer's data */
     uint32_t head = s_queue_head;
     LOG_QUEUE_READ_BARRIER();
@@ -316,8 +377,25 @@ void log_writer_tick(void) {
            LOG_RECORD_SIZE);
     s_write_chunk_len += LOG_RECORD_SIZE;
 
+    const LogRecord *queued_record = (const LogRecord *)&s_log_queue[tail];
+    if (s_capture.active && !s_capture.ready &&
+        queued_record->seq == (s_capture.target_end_seq - 1U)) {
+      s_capture.target_consumed = true;
+    } else if (s_capture.active && s_capture.ready) {
+      s_capture.post_target_records++;
+    }
+
     /* Advance local tail */
     tail = (tail + LOG_RECORD_SIZE) % LOG_RAM_QUEUE_SIZE;
+
+    if (s_capture.active && !s_capture.ready &&
+        s_capture.target_consumed) {
+      if (log_flush_write_chunk()) {
+        s_queue_tail = tail;
+        return;
+      }
+      break;
+    }
 
     /* If chunk is full, flush it */
     if (s_write_chunk_len >= LOG_WRITE_CHUNK_SIZE) {
@@ -347,7 +425,7 @@ void log_erase_tick(void) {
     return;
   }
 
-  if (log_is_dumping()) {
+  if (log_dump_blocks_logging() || s_capture.retention_hold) {
     return;
   }
 
@@ -447,6 +525,67 @@ uint32_t log_get_fields_mask(void) { return s_log_fields_mask; }
 
 uint16_t log_get_rate_hz(void) { return s_log_rate_hz; }
 
+bool log_capture_begin(void) {
+  if (!s_initialized || s_capture.active) {
+    return false;
+  }
+
+  if (s_total_records == 0U && s_queue_head == s_queue_tail &&
+      s_write_chunk_len == 0U) {
+    return false;
+  }
+
+  memset(&s_capture, 0, sizeof(s_capture));
+  s_capture.active = true;
+  s_capture.target_end_seq = s_next_seq;
+  s_capture.target_consumed =
+      log_write_chunk_contains_seq(s_capture.target_end_seq - 1U);
+  return true;
+}
+
+log_capture_state_t log_capture_poll(log_capture_snapshot_t *snapshot) {
+  if (!s_capture.active || s_capture.failed) {
+    return LOG_CAPTURE_FAILED;
+  }
+  if (!s_capture.ready) {
+    return LOG_CAPTURE_PENDING;
+  }
+  if (snapshot != NULL) {
+    snapshot->end_addr = s_capture.end_addr;
+    snapshot->end_seq = s_capture.target_end_seq;
+    snapshot->records_available = s_capture.records_available;
+  }
+  return LOG_CAPTURE_READY;
+}
+
+bool log_capture_protect(uint32_t records_to_protect) {
+  if (!s_capture.active || !s_capture.ready ||
+      s_capture.protection_enabled) {
+    return false;
+  }
+
+  const uint32_t capacity_records = LOG_RING_SIZE / LOG_RECORD_SIZE;
+  const uint32_t preerase_records =
+      (LOG_PREERASE_AHEAD * W25Q64_SECTOR_SIZE + LOG_RECORD_SIZE - 1U) /
+      LOG_RECORD_SIZE;
+  if (records_to_protect > capacity_records) {
+    records_to_protect = capacity_records;
+  }
+
+  if (records_to_protect + preerase_records >= capacity_records) {
+    s_capture.allowed_post_target_records = 0U;
+  } else {
+    s_capture.allowed_post_target_records =
+        capacity_records - records_to_protect - preerase_records;
+  }
+  s_capture.protection_enabled = true;
+  return true;
+}
+
+void log_capture_release(void) {
+  memset(&s_capture, 0, sizeof(s_capture));
+}
+
 /* Internal functions */
 
 static bool log_flush_write_chunk(void) {
@@ -470,6 +609,7 @@ static bool log_flush_write_chunk(void) {
   if (!qspi_w25q64_write_async_start(s_write_chunk_start_addr, s_write_chunk,
                                     s_write_chunk_first_len)) {
     log_note_qspi_error();
+    log_capture_note_write_error();
     s_write_chunk_len = 0;
     s_write_chunk_first_len = 0;
     s_write_chunk_second_len = 0;
@@ -497,6 +637,32 @@ static void log_advance_write_addr_after_chunk(void) {
     s_write_addr = LOG_RING_START;
     s_wrap_count++;
   }
+}
+
+static bool log_write_chunk_contains_seq(uint32_t seq) {
+  if (s_write_chunk_len < LOG_RECORD_SIZE) {
+    return false;
+  }
+  const LogRecord *last = (const LogRecord *)(
+      s_write_chunk + s_write_chunk_len - LOG_RECORD_SIZE);
+  return last->seq == seq;
+}
+
+static void log_capture_note_write_error(void) {
+  /* Every logger chunk committed before the watermark is part of the fixed
+   * source range. A failure in any one of them makes the capture incomplete. */
+  if (s_capture.active && !s_capture.ready) {
+    s_capture.failed = true;
+  }
+}
+
+static void log_capture_note_write_complete(void) {
+  if (!s_capture.active || s_capture.ready || !s_capture.target_consumed) {
+    return;
+  }
+  s_capture.end_addr = s_write_addr;
+  s_capture.records_available = s_total_records;
+  s_capture.ready = true;
 }
 
 static bool log_load_meta(void) {

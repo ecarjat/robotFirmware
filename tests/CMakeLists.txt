@@ -354,3 +354,28 @@ target_include_directories(test_app_rpc PRIVATE
 target_link_libraries(test_app_rpc PRIVATE Catch2::Catch2WithMain)
 
 add_test(NAME test_app_rpc COMMAND test_app_rpc)
+
+add_executable(test_blackbox_deferred_export
+  test_blackbox_deferred_export.cpp
+  fakes/fatfs_fake.c
+  fakes/qspi_fake.c
+  fakes/crc32_fake.c
+  fakes/led_status_fake.c
+  fakes/hal_fake.c
+  fakes/log_fake.c
+  ../app/logging/blackbox.c
+  ../app/logging/blackbox_dump.c
+)
+
+target_include_directories(test_blackbox_deferred_export PRIVATE
+  fakes
+  ../app
+  ../app/control
+  ../app/drivers
+  ../app/logging
+  ../app/utils
+)
+
+target_link_libraries(test_blackbox_deferred_export PRIVATE Catch2::Catch2WithMain)
+
+add_test(NAME test_blackbox_deferred_export COMMAND test_blackbox_deferred_export)

@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 extern "C" {
+#include "blackbox_dump_fake.h"
 #include "motion_modes.h"
 }
 
@@ -48,6 +49,7 @@ TEST_CASE("motion_modes_allows_output only in balancing", "[motion_modes]")
 
 TEST_CASE("balancing -> fallen on kill angle", "[motion_modes]")
 {
+    blackbox_dump_fake_reset();
     motion_modes_set(MOTION_MODE_BALANCING);
 
     motion_modes_input_t input = make_base_input(1000);
@@ -60,6 +62,8 @@ TEST_CASE("balancing -> fallen on kill angle", "[motion_modes]")
     CHECK(out.new_mode == MOTION_MODE_FALLEN);
     CHECK(out.disable_motors);
     CHECK(out.reset_pid);
+    CHECK(blackbox_dump_fake_capture_requests() == 1U);
+    CHECK(blackbox_dump_fake_tick_calls() == 0U);
 }
 
 TEST_CASE("balancing -> fallen on IMU timeout", "[motion_modes]")

@@ -300,7 +300,7 @@ static void app_idle_tick(void) {
   /* Blackbox logging background tasks */
   log_writer_tick();
   log_erase_tick();
-  log_dump_tick();
+  log_dump_tick(motion_control_get_mode() != MOTION_MODE_BALANCING);
 }
 
 void app_cdc_handle_frame(const uint8_t *data, uint32_t len) {

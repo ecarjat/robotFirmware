@@ -31,6 +31,31 @@ typedef struct {
 } log_stats_t;
 
 /**
+ * @brief Result of polling a capture watermark.
+ *
+ * A capture watermark is used by the dump module to freeze an exact end point
+ * in the QSPI ring without blocking the control loop while queued records are
+ * committed.
+ */
+typedef enum {
+  LOG_CAPTURE_PENDING = 0,
+  LOG_CAPTURE_READY,
+  LOG_CAPTURE_FAILED
+} log_capture_state_t;
+
+/**
+ * @brief Immutable source boundary for a deferred dump.
+ *
+ * end_addr and end_seq are exclusive: they identify the location and record
+ * sequence immediately after the last record accepted by the capture.
+ */
+typedef struct {
+  uint32_t end_addr;
+  uint32_t end_seq;
+  uint32_t records_available;
+} log_capture_snapshot_t;
+
+/**
  * @brief Initialize blackbox logging system
  *
  * - Reads/validates meta from flash (dual-slot recovery)
@@ -131,6 +156,35 @@ uint32_t log_get_fields_mask(void);
  * @return Log rate in Hz
  */
 uint16_t log_get_rate_hz(void);
+
+/**
+ * @brief Start a non-blocking capture of all records accepted so far.
+ *
+ * The logger flushes its current partial chunk through the capture boundary,
+ * but does not consume records accepted after it. Poll with
+ * log_capture_poll() until the source boundary is ready.
+ */
+bool log_capture_begin(void);
+
+/**
+ * @brief Poll a capture watermark.
+ *
+ * @param[out] snapshot Filled when LOG_CAPTURE_READY is returned.
+ */
+log_capture_state_t log_capture_poll(log_capture_snapshot_t *snapshot);
+
+/**
+ * @brief Protect a captured trailing window from ring overwrite.
+ *
+ * Once normal logging reaches the retention boundary, later records are
+ * dropped without blocking the control loop until log_capture_release().
+ */
+bool log_capture_protect(uint32_t records_to_protect);
+
+/**
+ * @brief Release a capture watermark and any retention hold.
+ */
+void log_capture_release(void);
 
 #ifdef __cplusplus
 }

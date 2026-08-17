@@ -22,28 +22,36 @@ still require target testing.
 
 ## Priority summary
 
-| Priority | Finding | Consequence |
-|---|---|---|
-| P0 | Blackbox dumping can run while balancing | Storage operations can block the foreground control loop. |
-| P0 | Raw RPC parameters are not semantically validated | A valid frame can apply NaN, infinity, or unsafe limits/gains. |
-| P1 | Redundant blackbox metadata shares one erase sector | Power loss can invalidate both copies and lose the ring pointer. |
-| P1 | Normal reboot command is a no-op | Reboot payload 0 does not enter the normal reboot path. |
-| P1 | Any valid frame refreshes the control heartbeat | Non-control traffic can keep an armed robot alive. |
-| P1 | CAN torque sends are change-driven, not watchdog-driven | Constant torque may not be refreshed after the first transmission. |
-| P2 | Telemetry v3 is absent from channel mapping | v3 uses sequence counter 0 rather than telemetry. |
-| P2 | File-list pagination cannot retrieve a second page | The response reports more entries without a usable cursor. |
-| P2 | Deadline accounting collapses missed timer releases | Overload is underreported and has no defined fault policy. |
-| P2 | RAM_D1 is 84% occupied | Only about 52 KiB of DMA-safe RAM headroom remains. |
-| P3 | CMake source globbing can miss newly added files | An incremental build can succeed without compiling a new source. |
+| Priority | Status | Finding | Consequence |
+|---|---|---|---|
+| P0 | Fixed | Blackbox dumping could run while balancing | Storage operations could block the foreground control loop. |
+| P0 | Fixed | Raw RPC parameters were not semantically validated | A valid frame could apply NaN, infinity, or unsafe limits/gains. |
+| P1 | Open | Redundant blackbox metadata shares one erase sector | Power loss can invalidate both copies and lose the ring pointer. |
+| P1 | Open | Normal reboot command is a no-op | Reboot payload 0 does not enter the normal reboot path. |
+| P1 | Open | Any valid frame refreshes the control heartbeat | Non-control traffic can keep an armed robot alive. |
+| P1 | Open | CAN torque sends are change-driven, not watchdog-driven | Constant torque may not be refreshed after the first transmission. |
+| P2 | Open | Telemetry v3 is absent from channel mapping | v3 uses sequence counter 0 rather than telemetry. |
+| P2 | Open | File-list pagination cannot retrieve a second page | The response reports more entries without a usable cursor. |
+| P2 | Open | Deadline accounting collapses missed timer releases | Overload is underreported and has no defined fault policy. |
+| P2 | Open | RAM_D1 is 84% occupied | Only about 52 KiB of DMA-safe RAM headroom remains. |
+| P3 | Open | CMake source globbing can miss newly added files | An incremental build can succeed without compiling a new source. |
 
 ## Findings
 
 ### P0 — Blackbox dump work can block control while armed
 
-app/app_cmd.c accepts a teleop dump edge at lines 37-45 without checking the
-motion mode. The same teleop packet can then arm at lines 56-60. A dump
-continues unconditionally from app_idle_tick in app/app_main.c at lines
-300-303.
+Status: fixed. A dump request now establishes an asynchronous logger capture
+watermark; it does not synchronously flush QSPI or perform filesystem work.
+The capture state remains safe while balancing, while QSPI reads, directory
+scans, SD writes, and finalization are deferred until the control mode is no
+longer `BALANCING`. The retained capture window is protected from ring
+overwrite during the deferred export. Host tests cover a wrapped snapshot,
+post-request exclusion, failure cleanup, and the no-export-while-balancing
+gate.
+
+Before this fix, app/app_cmd.c accepted a teleop dump edge without checking the
+motion mode. The same teleop packet could then arm, while the dump continued
+unconditionally from app_idle_tick.
 
 The idle-budget check only verifies that time remains before entering
 app_idle_tick; it cannot preempt that work. The dump performs polling QSPI
@@ -57,16 +65,12 @@ Impact: a dump requested while armed, or a dump and arm edge in the same
 teleop packet, can delay one or more control cycles and cause a fall or unsafe
 actuator behaviour.
 
-Recommended actions:
+Remaining qualification:
 
-1. Permit dumps only while disarmed and manual motor mode is off; reject arming
-   while a dump is active.
-2. Abort or pause a dump before arming, and do not execute SD/QSPI dump work in
-   the balancing path.
-3. Bound every background operation by the remaining deadline, or run storage
-   work in a task that cannot delay control.
-4. Add target timing tests for dump-then-arm ordering and an SD card with
-   deliberately slow writes.
+1. Run target timing tests for dump-then-arm ordering and deliberately slow SD
+   writes.
+2. Measure and bound the non-blocking capture service work against the control
+   deadline on hardware.
 
 ### P0 — RPC can install unsafe live parameters
 
@@ -76,10 +80,10 @@ cross-field constraints), and rejects parameter writes while balancing or
 manual motor mode is active. `control_timer_set_rate_hz()` also falls back for
 non-finite input.
 
-app/app_rpc.c:243-263 accepts a byte offset and length, copies arbitrary bytes
-into a candidate robot_params_t, and applies it after only bounds checks. No
-schema-level validation occurs before motion_control_apply_params or
-control_timer_set_rate_hz.
+Before this fix, app/app_rpc.c accepted a byte offset and length, copied
+arbitrary bytes into a candidate robot_params_t, and applied it after only
+bounds checks. No schema-level validation occurred before
+motion_control_apply_params or control_timer_set_rate_hz.
 
 For example, a NaN control_rate_hz bypasses the rate_hz <= 1e-3f fallback in
 app/control/control_timer.c:87-127. Converting a NaN-derived period to an
@@ -213,18 +217,17 @@ clean configure/build in CI.
 
 ## Recommended implementation order
 
-1. Block dumps and all long storage work while armed; fix normal reboot; add
-   parameter validation.
+1. Fix normal reboot and qualify the P0 dump/RPC fixes on target hardware.
 2. Redesign metadata persistence and establish CAN watchdog/freshness rules.
 3. Separate control heartbeat from transport liveness and add overload metrics.
 4. Repair v3 sequence mapping, file pagination, and source discovery.
-5. Qualify on hardware: deadline load tests, metadata power-cut tests, CAN
+5. Run deadline load tests, metadata power-cut tests, CAN
    bus-off/watchdog tests, and parameter fuzzing.
 
 ## Test gaps
 
-The passing host suite covers several control, kinematics, RPC, telemetry, and
-motor-backend behaviours. It does not cover the critical paths above:
-dump-plus-arm ordering, normal reboot, non-finite RPC writes, metadata
-power-loss recovery, heartbeat classification, CAN keepalive behaviour, or
-hardware deadline behaviour under SD/QSPI load.
+The host suite now covers RPC semantic validation and deferred dump export,
+alongside control, kinematics, telemetry, and motor-backend behaviour. It does
+not provide target timing qualification for dump-plus-arm ordering or SD/QSPI
+load, and it still lacks normal-reboot, metadata power-loss, heartbeat
+classification, and CAN-keepalive coverage.

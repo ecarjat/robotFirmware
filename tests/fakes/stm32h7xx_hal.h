@@ -46,6 +46,14 @@ extern TIM_HandleTypeDef htim2;
 uint32_t HAL_RCC_GetPCLK1Freq(void);
 uint32_t HAL_RCC_GetHCLKFreq(void);
 uint32_t HAL_GetTick(void);
+void HAL_Delay(uint32_t delay_ms);
+
+extern uint32_t g_hal_delay_calls;
+extern uint32_t g_hal_tick;
+
+#ifndef __DMB
+#define __DMB() do { } while (0)
+#endif
 
 void HAL_TIM_Base_Start_IT(TIM_HandleTypeDef *htim);
 void HAL_TIM_Base_Stop_IT(TIM_HandleTypeDef *htim);

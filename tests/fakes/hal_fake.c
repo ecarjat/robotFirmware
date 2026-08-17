@@ -43,6 +43,7 @@ uint32_t g_hal_pclk1_freq = 100000000U;
 uint32_t g_hal_hclk_freq = 200000000U;
 uint32_t g_hal_apb1_prescaler = LL_RCC_APB1_DIV_1;
 uint32_t g_hal_tick = 0U;
+uint32_t g_hal_delay_calls = 0U;
 
 volatile uint32_t test_dwt_ctrl = 0;
 volatile uint32_t test_dwt_cyccnt = 0;
@@ -61,6 +62,12 @@ uint32_t HAL_RCC_GetHCLKFreq(void)
 uint32_t HAL_GetTick(void)
 {
     return g_hal_tick;
+}
+
+void HAL_Delay(uint32_t delay_ms)
+{
+    g_hal_delay_calls++;
+    g_hal_tick += delay_ms;
 }
 
 uint32_t LL_RCC_GetAPB1Prescaler(void)

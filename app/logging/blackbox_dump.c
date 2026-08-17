@@ -1,6 +1,7 @@
 #include "blackbox_dump.h"
 
 #include "app_config.h"
+#include "app_log_macros.h"
 #include "blackbox.h"
 #include "blackbox_format.h"
 #include "crc32.h"
@@ -9,16 +10,24 @@
 #include <stdio.h>
 #include <string.h>
 
+#if defined(APP_CONFIG_HOST)
+#define DUMP_DMA_BUFFER __attribute__((aligned(32)))
+#else
+#define DUMP_DMA_BUFFER __attribute__((section(".dma_buffer"), aligned(32)))
+#endif
+
 /* Dump chunk size (8 KB - balance between RAM usage and SD efficiency) */
 #define DUMP_CHUNK_SIZE (8192U)
 
 /* Dump buffer (in .dma_buffer section for SD DMA) */
 static uint8_t s_dump_buffer[DUMP_CHUNK_SIZE]
-    __attribute__((section(".dma_buffer"), aligned(32)));
+    DUMP_DMA_BUFFER;
 
 /* Dump state machine */
 typedef enum {
   DUMP_IDLE,
+  DUMP_CAPTURE_FLUSHING,
+  DUMP_CAPTURED_WAIT_SAFE,
   DUMP_OPENING_FILE,
   DUMP_WRITING_META,
   DUMP_READING_QSPI,
@@ -42,19 +51,24 @@ static struct {
   char filename[16];         /* DUMP_nnnn.BIN */
   uint32_t last_dump_id;     /* Dump file counter */
   size_t current_chunk_size; /* Size of chunk being transferred */
-} s_dump_ctx __attribute__((section(".dma_buffer"), aligned(32)));
+  uint32_t requested_seconds;
+  bool file_open;
+} s_dump_ctx DUMP_DMA_BUFFER;
 
-static LogMeta s_dump_meta __attribute__((section(".dma_buffer"), aligned(32)));
-static LogDumpTrailer s_dump_trailer __attribute__((section(".dma_buffer"), aligned(32)));
+static LogMeta s_dump_meta DUMP_DMA_BUFFER;
+static LogDumpTrailer s_dump_trailer DUMP_DMA_BUFFER;
 static bool s_dump_ctx_initialized = false;
 
 /* Internal functions */
 static const char *dump_state_name(dump_state_t state);
 static void dump_reset_context(void);
-static bool dump_calculate_window(uint32_t seconds);
+static bool dump_calculate_window(const log_capture_snapshot_t *snapshot,
+                                  uint32_t seconds);
 static bool dump_generate_filename(void);
 static void dump_advance_state(dump_state_t next_state);
 static void dump_clean_cache(const void *addr, size_t len);
+static void dump_abort_capture(const char *reason);
+static void dump_abort_export(const char *reason);
 
 void log_dump_init(void) {
   dump_reset_context();
@@ -62,8 +76,7 @@ void log_dump_init(void) {
 }
 
 bool log_dump_last_seconds(uint32_t seconds) {
-  /* Check if already dumping */
-  if (s_dump_ctx.state != DUMP_IDLE) {
+  if (seconds == 0U || s_dump_ctx.state != DUMP_IDLE) {
     return false;
   }
 
@@ -72,36 +85,75 @@ bool log_dump_last_seconds(uint32_t seconds) {
     return false;
   }
 
-  if (!log_flush_pending(200U)) {
-    APP_LOG_WARN("Dump flush timed out - proceeding with partial queue");
-  }
-
-  /* Calculate dump window */
-  if (!dump_calculate_window(seconds)) {
+  /* Capture only the data accepted at this instant. The logger commits the
+   * boundary asynchronously, so this path never waits for QSPI or FatFs. */
+  if (!log_capture_begin()) {
     return false;
   }
 
-  /* Generate filename */
-  if (!dump_generate_filename()) {
-    return false;
-  }
-
-  /* Initiate dump */
-  dump_advance_state(DUMP_OPENING_FILE);
+  s_dump_ctx.requested_seconds = seconds;
+  dump_advance_state(DUMP_CAPTURE_FLUSHING);
   return true;
 }
 
 bool log_is_dumping(void) {
-  return (s_dump_ctx.state != DUMP_IDLE && s_dump_ctx.state != DUMP_DONE);
+  return s_dump_ctx.state != DUMP_IDLE;
 }
 
-void log_dump_tick(void) {
+bool log_dump_blocks_logging(void) {
+  return s_dump_ctx.state >= DUMP_OPENING_FILE &&
+         s_dump_ctx.state <= DUMP_FINALIZING;
+}
+
+void log_dump_tick(bool export_allowed) {
   FRESULT res;
   UINT bytes_written;
+
+  /* Never start or continue a blocking filesystem operation while the
+   * caller reports balancing. Capture state processing remains non-blocking. */
+  if (log_dump_blocks_logging() && !export_allowed) {
+    return;
+  }
 
   switch (s_dump_ctx.state) {
     case DUMP_IDLE:
       /* Nothing to do */
+      break;
+
+    case DUMP_CAPTURE_FLUSHING:
+      {
+        log_capture_snapshot_t snapshot = {0};
+        log_capture_state_t capture_state = log_capture_poll(&snapshot);
+        if (capture_state == LOG_CAPTURE_FAILED) {
+          dump_abort_capture("QSPI capture flush failed");
+          break;
+        }
+        if (capture_state != LOG_CAPTURE_READY) {
+          break;
+        }
+        if (!dump_calculate_window(&snapshot, s_dump_ctx.requested_seconds)) {
+          dump_abort_capture("captured window is empty");
+          break;
+        }
+        if (!log_capture_protect(s_dump_ctx.record_count)) {
+          dump_abort_capture("could not protect captured window");
+          break;
+        }
+        dump_advance_state(DUMP_CAPTURED_WAIT_SAFE);
+      }
+      break;
+
+    case DUMP_CAPTURED_WAIT_SAFE:
+      if (!export_allowed) {
+        break;
+      }
+      /* Directory scans and filename allocation are filesystem work and are
+       * intentionally deferred until the robot is no longer balancing. */
+      if (!dump_generate_filename()) {
+        dump_abort_capture("could not generate dump filename");
+        break;
+      }
+      dump_advance_state(DUMP_OPENING_FILE);
       break;
 
     case DUMP_OPENING_FILE:
@@ -111,9 +163,12 @@ void log_dump_tick(void) {
       if (res != FR_OK) {
         APP_LOG_ERROR("Dump open failed for %s (err=%d)",
                       s_dump_ctx.filename, res);
-        dump_reset_context();
+        /* f_open did not confirm ownership of a new file, so never unlink
+         * this name: an existing user dump must not be removed on error. */
+        dump_abort_capture("file open failed");
         break;
       }
+      s_dump_ctx.file_open = true;
       dump_advance_state(DUMP_WRITING_META);
       break;
 
@@ -130,7 +185,7 @@ void log_dump_tick(void) {
         s_dump_meta.log_fields_mask = log_get_fields_mask();
         s_dump_meta.ring_start = LOG_RING_START;
         s_dump_meta.ring_size = LOG_RING_SIZE;
-        s_dump_meta.write_addr = log_get_write_addr();
+        s_dump_meta.write_addr = s_dump_ctx.end_addr;
         s_dump_meta.wrap_count = 0;  /* Not used in dump */
         s_dump_meta.boot_count = 0;  /* Not used in dump */
         s_dump_meta.last_dump_id = s_dump_ctx.last_dump_id;
@@ -146,8 +201,7 @@ void log_dump_tick(void) {
           APP_LOG_ERROR("Dump meta write failed (err=%d, wrote=%u/%u)",
                         res, (unsigned int)bytes_written,
                         (unsigned int)sizeof(LogMeta));
-          f_close(&s_dump_ctx.file);
-          dump_reset_context();
+          dump_abort_export("metadata write failed");
           break;
         }
 
@@ -180,21 +234,18 @@ void log_dump_tick(void) {
         if (read_addr + chunk_size > LOG_RING_END) {
           size_t first_part = LOG_RING_END - read_addr;
           if (!qspi_w25q64_read(read_addr, s_dump_buffer, first_part)) {
-            f_close(&s_dump_ctx.file);
-            dump_reset_context();
+            dump_abort_export("QSPI read failed");
             break;
           }
           if (!qspi_w25q64_read(LOG_RING_START, s_dump_buffer + first_part,
                                 chunk_size - first_part)) {
-            f_close(&s_dump_ctx.file);
-            dump_reset_context();
+            dump_abort_export("QSPI wrapped read failed");
             break;
           }
         } else {
           /* Single contiguous read */
           if (!qspi_w25q64_read(read_addr, s_dump_buffer, chunk_size)) {
-            f_close(&s_dump_ctx.file);
-            dump_reset_context();
+            dump_abort_export("QSPI read failed");
             break;
           }
         }
@@ -219,8 +270,7 @@ void log_dump_tick(void) {
           APP_LOG_ERROR("Dump data write failed (err=%d, wrote=%u/%u)",
                         res, (unsigned int)bytes_written,
                         (unsigned int)chunk_size);
-          f_close(&s_dump_ctx.file);
-          dump_reset_context();
+          dump_abort_export("SD data write failed");
           break;
         }
 
@@ -250,8 +300,7 @@ void log_dump_tick(void) {
           APP_LOG_ERROR("Dump trailer write failed (err=%d, wrote=%u/%u)",
                         res, (unsigned int)bytes_written,
                         (unsigned int)sizeof(LogDumpTrailer));
-          f_close(&s_dump_ctx.file);
-          dump_reset_context();
+          dump_abort_export("dump trailer write failed");
           break;
         }
 
@@ -261,16 +310,16 @@ void log_dump_tick(void) {
         res = f_sync(&s_dump_ctx.file);
         if (res != FR_OK) {
           APP_LOG_ERROR("Dump sync failed (err=%d)", res);
-          f_close(&s_dump_ctx.file);
-          dump_reset_context();
+          dump_abort_export("dump sync failed");
           break;
         }
         res = f_close(&s_dump_ctx.file);
         if (res != FR_OK) {
           APP_LOG_ERROR("Dump close failed (err=%d)", res);
-          dump_reset_context();
+          dump_abort_export("dump close failed");
           break;
         }
+        s_dump_ctx.file_open = false;
 
         dump_advance_state(DUMP_DONE);
       }
@@ -281,6 +330,7 @@ void log_dump_tick(void) {
       APP_LOG_INFO("Dump complete: %s (%lu bytes)",
                    s_dump_ctx.filename,
                    (unsigned long)s_dump_ctx.bytes_written);
+      log_capture_release();
       dump_reset_context();
       break;
   }
@@ -310,15 +360,14 @@ static void dump_reset_context(void) {
   s_dump_ctx.state = DUMP_IDLE;
 }
 
-static bool dump_calculate_window(uint32_t seconds) {
-  /* Get current logger state */
-  uint32_t write_addr = log_get_write_addr();
-  uint32_t current_seq = log_get_seq();
+static bool dump_calculate_window(const log_capture_snapshot_t *snapshot,
+                                  uint32_t seconds) {
+  if (snapshot == NULL) {
+    return false;
+  }
 
-  log_stats_t stats = {0};
-  log_get_stats(&stats);
   uint32_t capacity_records = LOG_RING_SIZE / LOG_RECORD_SIZE;
-  uint32_t records_written = stats.total_records;
+  uint32_t records_written = snapshot->records_available;
   if (records_written > capacity_records) {
     records_written = capacity_records;
   }
@@ -346,10 +395,10 @@ static bool dump_calculate_window(uint32_t seconds) {
    * Calculate the start address by walking back from the current write
    * pointer, wrapping around the ring if needed.
    */
-  uint32_t start_addr = write_addr;
-  uint32_t offset = write_addr - LOG_RING_START;
+  uint32_t start_addr = snapshot->end_addr;
+  uint32_t offset = snapshot->end_addr - LOG_RING_START;
   if (bytes <= offset) {
-    start_addr = write_addr - bytes;
+    start_addr = snapshot->end_addr - bytes;
   } else {
     uint32_t deficit = bytes - offset;
     start_addr = LOG_RING_END - deficit;
@@ -358,12 +407,13 @@ static bool dump_calculate_window(uint32_t seconds) {
 
   /* Store dump window */
   s_dump_ctx.start_addr = start_addr;
-  s_dump_ctx.end_addr = write_addr;
+  s_dump_ctx.end_addr = snapshot->end_addr;
   s_dump_ctx.current_addr = start_addr;
   s_dump_ctx.bytes_remaining = bytes;
   s_dump_ctx.record_count = records;
-  s_dump_ctx.start_seq = (current_seq >= records) ? (current_seq - records) : 0;
-  s_dump_ctx.end_seq = current_seq;
+  s_dump_ctx.start_seq = (snapshot->end_seq >= records) ?
+      (snapshot->end_seq - records) : 0;
+  s_dump_ctx.end_seq = snapshot->end_seq;
 
   return true;
 }
@@ -426,6 +476,8 @@ static bool dump_generate_filename(void) {
 static const char *dump_state_name(dump_state_t state) {
   switch (state) {
     case DUMP_IDLE: return "IDLE";
+    case DUMP_CAPTURE_FLUSHING: return "CAPTURE_FLUSHING";
+    case DUMP_CAPTURED_WAIT_SAFE: return "CAPTURED_WAIT_SAFE";
     case DUMP_OPENING_FILE: return "OPENING_FILE";
     case DUMP_WRITING_META: return "WRITING_META";
     case DUMP_READING_QSPI: return "READING_QSPI";
@@ -434,6 +486,29 @@ static const char *dump_state_name(dump_state_t state) {
     case DUMP_DONE: return "DONE";
     default: return "UNKNOWN";
   }
+}
+
+static void dump_abort_capture(const char *reason) {
+  APP_LOG_ERROR("Dump capture failed: %s", reason);
+  log_capture_release();
+  dump_reset_context();
+}
+
+static void dump_abort_export(const char *reason) {
+  APP_LOG_ERROR("Dump export failed: %s", reason);
+  if (s_dump_ctx.file_open) {
+    (void)f_close(&s_dump_ctx.file);
+    s_dump_ctx.file_open = false;
+  }
+  if (s_dump_ctx.filename[0] != '\0') {
+    FRESULT unlink_res = f_unlink(s_dump_ctx.filename);
+    if (unlink_res != FR_OK) {
+      APP_LOG_WARN("Dump cleanup failed for %s (err=%d)",
+                   s_dump_ctx.filename, unlink_res);
+    }
+  }
+  log_capture_release();
+  dump_reset_context();
 }
 
 static void dump_advance_state(dump_state_t next_state) {

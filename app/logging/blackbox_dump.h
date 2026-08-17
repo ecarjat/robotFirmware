@@ -17,16 +17,18 @@ extern "C" {
 void log_dump_init(void);
 
 /**
- * @brief Initiate a blackbox dump to SD card
+ * @brief Capture the trailing blackbox window for deferred SD export.
  *
  * Dumps the last N seconds of logged data from the QSPI ring buffer
  * to an SD file (DUMP_0001.BIN, DUMP_0002.BIN, etc.)
  *
- * This function is non-blocking - it starts the dump process which
- * runs cooperatively in the background via log_dump_tick().
+ * This function does no filesystem or QSPI read work. It records a capture
+ * watermark and the background state machine commits the queued source data.
+ * SD export begins only when log_dump_tick() is called with export_allowed.
  *
  * @param seconds Number of seconds to dump (e.g., 30)
- * @return true if dump was initiated, false if already dumping or SD not ready
+ * @return true if capture was accepted, false if a capture is already active,
+ *         SD is unavailable, or no log data exists
  */
 bool log_dump_last_seconds(uint32_t seconds);
 
@@ -40,10 +42,21 @@ bool log_is_dumping(void);
 /**
  * @brief Background dump tick - call periodically from app_idle_tick()
  *
- * Advances the dump state machine. Should be called regularly
- * (e.g., every 50ms in the idle loop) to make progress on dumps.
+ * Advances capture processing on every call. Filesystem, QSPI-read, and SD
+ * write states advance only when export_allowed is true.
+ *
+ * @param export_allowed true only when it is safe to run blocking SD export
  */
-void log_dump_tick(void);
+void log_dump_tick(bool export_allowed);
+
+/**
+ * @brief Return whether the active dump is in an export state.
+ *
+ * Internal logging users use this to pause QSPI producer/consumer work while
+ * the exporter reads the protected ring snapshot. Capture-pending states do
+ * not block logging.
+ */
+bool log_dump_blocks_logging(void);
 
 /**
  * @brief Get dump statistics
