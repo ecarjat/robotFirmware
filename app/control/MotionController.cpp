@@ -13,6 +13,30 @@ static constexpr float kGainEpsilon = 1e-6f;
  * Uses a large but finite value to prevent unbounded windup. */
 static constexpr float kDefaultIntegralLimit = 1000.0f;
 
+/* Deceleration-aware stop mode:
+ * when user command is released at non-trivial speed, ramp v_ref down instead
+ * of snapping to zero to avoid a large transient position pull-back. */
+static constexpr float kStopEnterCmdMps = 0.05f;
+static constexpr float kStopReengageCmdMps = 0.12f;
+static constexpr float kStopEnterMeasMps = 0.35f;
+static constexpr float kStopExitMeasMps = 0.12f;
+static constexpr float kStopDecelMps2 = 0.8f;
+
+/* Turn-aware position-loop suppression:
+ * reduce/disable K0 during strong yaw maneuvers to avoid position loop
+ * fighting in-place turns or spending balance authority on world-frame drift. */
+static constexpr float kTurnSuppressEnterCmd = 0.35f;     /* teleop turn command (0..1) */
+static constexpr float kTurnSuppressExitCmd = 0.20f;
+static constexpr float kTurnSuppressFullCmd = 0.85f;
+static constexpr float kTurnSuppressEnterYawRadS = 1.0f;  /* blended yaw-rate estimate */
+static constexpr float kTurnSuppressExitYawRadS = 0.6f;
+static constexpr float kTurnSuppressFullYawRadS = 2.5f;
+static constexpr float kInPlaceTurnVRefMaxMps = 0.20f;
+
+/* Yaw governor:
+ * reserve part of wheel torque headroom for balance/longitudinal loop. */
+static constexpr float kYawHeadroomReserveNm = 2.0f;
+
 namespace {
 
 inline float clampf(float val, float limit)
@@ -20,6 +44,39 @@ inline float clampf(float val, float limit)
     if (val > limit) return limit;
     if (val < -limit) return -limit;
     return val;
+}
+
+inline float clamp01(float val)
+{
+    if (val < 0.0f) return 0.0f;
+    if (val > 1.0f) return 1.0f;
+    return val;
+}
+
+inline float lerpf(float a, float b, float t)
+{
+    return a + (b - a) * t;
+}
+
+LqrSpeedSchedule sanitizeSpeedSchedule(LqrSpeedSchedule s)
+{
+    if (s.cruise_enter_cmd_mps < 0.0f) s.cruise_enter_cmd_mps = 0.0f;
+    if (s.cruise_exit_cmd_mps < 0.0f) s.cruise_exit_cmd_mps = 0.0f;
+    if (s.cruise_enter_meas_mps < 0.0f) s.cruise_enter_meas_mps = 0.0f;
+    if (s.cruise_exit_meas_mps < 0.0f) s.cruise_exit_meas_mps = 0.0f;
+    if (s.v_ref_margin_mps < 0.0f) s.v_ref_margin_mps = 0.0f;
+    if (s.theta_ref_limit_rest_cap_rad < 0.0f) s.theta_ref_limit_rest_cap_rad = 0.0f;
+    if (s.theta_ref_limit_cruise_cap_rad < 0.0f) s.theta_ref_limit_cruise_cap_rad = 0.0f;
+    if (s.yaw_damp_cruise_mult < 0.0f) s.yaw_damp_cruise_mult = 0.0f;
+    if (s.cruise_blend_tau_s < 0.0f) s.cruise_blend_tau_s = 0.0f;
+
+    if (s.cruise_exit_cmd_mps > s.cruise_enter_cmd_mps) {
+        s.cruise_exit_cmd_mps = s.cruise_enter_cmd_mps;
+    }
+    if (s.cruise_exit_meas_mps > s.cruise_enter_meas_mps) {
+        s.cruise_exit_meas_mps = s.cruise_enter_meas_mps;
+    }
+    return s;
 }
 
 }  /* anonymous namespace */
@@ -72,6 +129,11 @@ MotionController::MotionController(const RobotParams& robotParams)
     _lqr.engage_ramp_ms = LQR_ENGAGE_RAMP_MS;
     _lqr.disengage_ramp_ms = LQR_DISENGAGE_RAMP_MS;
     _lqr.default_mode = 0;
+    _speedSchedule = sanitizeSpeedSchedule(_speedSchedule);
+    _k0Eff = _lqr.K[0];
+    _vRefLimitEff = (_lqr.v_ref_limit > 0.0f) ? _lqr.v_ref_limit : 100.0f;
+    _thetaRefLimitEff = _lqr.theta_ref_limit;
+    _yawDampEff = _yawDampGain;
 }
 
 void MotionController::setRobotParams(const RobotParams& params)
@@ -108,6 +170,7 @@ void MotionController::setBalanceGains(const balance_gains_t& gains)
     _yawBlendAlpha = gains.alpha_yaw;
     if (_yawBlendAlpha < 0.0f) _yawBlendAlpha = 0.0f;
     if (_yawBlendAlpha > 1.0f) _yawBlendAlpha = 1.0f;
+    _yawDampEff = _yawDampGain;
 
     _iqMax = gains.IqMax;
     _velPid_iMax = gains.iV_max;
@@ -124,18 +187,28 @@ void MotionController::setLqrParams(const lqr_params_t& lqr)
 
     _lqr = lqr;
 
-    if (changed) {
-        APP_LOG_INFO("LQR params: K=[%.2f,%.2f,%.2f,%.2f] u_lim=%.1f",
-                     (double)lqr.K[0], (double)lqr.K[1],
-                     (double)lqr.K[2], (double)lqr.K[3],
-                     (double)lqr.u_limit);
-    }
+    // Removed verbose LQR params logging
+    // if (changed) {
+    //     APP_LOG_INFO("LQR params: K=[%.2f,%.2f,%.2f,%.2f] u_lim=%.1f",
+    //                  (double)lqr.K[0], (double)lqr.K[1],
+    //                  (double)lqr.K[2], (double)lqr.K[3],
+    //                  (double)lqr.u_limit);
+    // }
 }
 
 void MotionController::setLqrEquilibrium(float thetaRef, float uEq)
 {
     _thetaRef = thetaRef;
     _uEq = uEq;
+}
+
+void MotionController::setLqrSpeedSchedule(const LqrSpeedSchedule& schedule)
+{
+    _speedSchedule = sanitizeSpeedSchedule(schedule);
+    if (!_speedSchedule.enabled) {
+        _cruiseMode = false;
+        _cruiseAlpha = 0.0f;
+    }
 }
 
 void MotionController::setRequestedMode(InnerLongMode mode)
@@ -185,6 +258,90 @@ void MotionController::updateBlendAlpha(float dt)
     }
 }
 
+bool MotionController::updateStopMode(float xDot, float dt)
+{
+    bool just_exited = false;
+    const float abs_cmd = fabsf(_targetVel);
+    const float abs_meas = fabsf(xDot);
+
+    // Arm stop-mode once command has been non-trivial. This allows smooth
+    // teleop ramp-down releases (not only single-step command drops).
+    if (abs_cmd >= kStopReengageCmdMps) {
+        _stopModeArmed = true;
+    }
+
+    if (!_stopModeActive) {
+        if (_stopModeArmed &&
+            abs_cmd <= kStopEnterCmdMps &&
+            abs_meas >= kStopEnterMeasMps) {
+            _stopModeActive = true;
+            _stopModeArmed = false;
+            _stopModeVRef = xDot;
+        }
+    } else {
+        if (abs_cmd >= kStopReengageCmdMps) {
+            _stopModeActive = false;
+            _stopModeArmed = true;
+            _stopModeVRef = 0.0f;
+            just_exited = true;
+        } else {
+            float step = kStopDecelMps2 * dt;
+            if (step < 0.0f) step = 0.0f;
+            if (_stopModeVRef > step) {
+                _stopModeVRef -= step;
+            } else if (_stopModeVRef < -step) {
+                _stopModeVRef += step;
+            } else {
+                _stopModeVRef = 0.0f;
+            }
+
+            if (fabsf(_stopModeVRef) <= kStopEnterCmdMps &&
+                abs_meas <= kStopExitMeasMps) {
+                _stopModeActive = false;
+                _stopModeVRef = 0.0f;
+                just_exited = true;
+            }
+        }
+    }
+
+    _prevTargetVelCmd = _targetVel;
+    return just_exited;
+}
+
+void MotionController::updateCruiseSchedule(float cmdVel, float xDot, float dt)
+{
+    if (!_speedSchedule.enabled) {
+        _cruiseMode = false;
+        _cruiseAlpha = 0.0f;
+        return;
+    }
+
+    const float abs_cmd = fabsf(cmdVel);
+    const float abs_meas = fabsf(xDot);
+
+    if (_cruiseMode) {
+        if (abs_cmd <= _speedSchedule.cruise_exit_cmd_mps &&
+            abs_meas <= _speedSchedule.cruise_exit_meas_mps) {
+            _cruiseMode = false;
+        }
+    } else {
+        if (abs_cmd >= _speedSchedule.cruise_enter_cmd_mps ||
+            abs_meas >= _speedSchedule.cruise_enter_meas_mps) {
+            _cruiseMode = true;
+        }
+    }
+
+    const float target_alpha = _cruiseMode ? 1.0f : 0.0f;
+    if (_speedSchedule.cruise_blend_tau_s <= kGainEpsilon) {
+        _cruiseAlpha = target_alpha;
+        return;
+    }
+    float step = dt / _speedSchedule.cruise_blend_tau_s;
+    step = clamp01(step);
+    _cruiseAlpha += (target_alpha - _cruiseAlpha) * step;
+    _cruiseAlpha = clamp01(_cruiseAlpha);
+}
+
 float MotionController::computeLqrUSumNm(const StateEstimate& state, float vRef, float thetaRef)
 {
     /*
@@ -209,13 +366,41 @@ float MotionController::computeLqrUSumNm(const StateEstimate& state, float vRef,
     float x_err = state.x - _xRef;
     _lastXErr = x_err;
     
-    /* K[0] now acts as position→velocity gain (not position→torque) */
-    /* Use configured v_ref_limit; 0 disables clamping */
-    const float v_ref_max = (_lqr.v_ref_limit > 0.0f) ? _lqr.v_ref_limit : 100.0f;
+    const float cruise_alpha = _speedSchedule.enabled ? _cruiseAlpha : 0.0f;
+
+    /* K[0] now acts as position→velocity gain (not position→torque).
+     * Suppress K0 in cruise mode to avoid late "catch-up" position action. */
+    const float stop_scale = _stopModeActive ? 0.0f : 1.0f;
+    const float k0_eff = _lqr.K[0] * (1.0f - cruise_alpha) * stop_scale * _turnK0Scale;
+    _k0Eff = k0_eff;
+
+    /* Use configured v_ref_limit; 0 disables clamping.
+     * In cruise mode, allow v_ref to expand toward |v_cmd| + margin. */
+    const float v_ref_max_base = (_lqr.v_ref_limit > 0.0f) ? _lqr.v_ref_limit : 100.0f;
+    const float v_ref_target = fabsf(vRef) + _speedSchedule.v_ref_margin_mps;
+    const float v_ref_max_sched = lerpf(v_ref_max_base, v_ref_target, cruise_alpha);
+    const float v_ref_max = (_speedSchedule.enabled)
+                                ? fmaxf(v_ref_max_base, v_ref_max_sched)
+                                : v_ref_max_base;
+    _vRefLimitEff = v_ref_max;
+
+    /* Schedule theta reference cap from rest->cruise, bounded by base lqr.theta_ref_limit. */
+    float theta_ref_limit_eff = _lqr.theta_ref_limit;
+    if (_lqr.theta_ref_limit > 0.0f && _speedSchedule.enabled) {
+        const float cap_sched = lerpf(_speedSchedule.theta_ref_limit_rest_cap_rad,
+                                      _speedSchedule.theta_ref_limit_cruise_cap_rad,
+                                      cruise_alpha);
+        theta_ref_limit_eff = fminf(_lqr.theta_ref_limit, cap_sched);
+        if (theta_ref_limit_eff < 0.0f) {
+            theta_ref_limit_eff = 0.0f;
+        }
+    }
+    _thetaRefLimitEff = theta_ref_limit_eff;
+
     float v_ref_from_pos = 0.0f;
-    if (fabsf(_lqr.K[0]) > kGainEpsilon) {
+    if (fabsf(k0_eff) > kGainEpsilon) {
         /* K[0] is negative, x_err positive when ahead of target → v_ref negative (go back) */
-        v_ref_from_pos = _lqr.K[0] * x_err;  /* Already negative gain */
+        v_ref_from_pos = k0_eff * x_err;  /* Already negative gain */
         v_ref_from_pos = clampf(v_ref_from_pos, v_ref_max);
     }
     
@@ -231,14 +416,23 @@ float MotionController::computeLqrUSumNm(const StateEstimate& state, float vRef,
     
     float v_err = v_ref_total - state.xDot;  /* (v_ref - v): positive when going too slow */
     
-    /* Leaky integration: trim += ki * v_err * dt - leak * trim * dt */
-    _thetaTrim += k_trim * v_err * dt;
-    _thetaTrim -= k_leak * _thetaTrim * dt;
+    /* Leaky integration: trim += ki * v_err * dt - leak * trim * dt
+     * Freeze trim integration in in-place turn mode to avoid injecting
+     * forward/backward bias while yaw dynamics dominate. */
+    if (!_turnInPlaceActive) {
+        _thetaTrim += k_trim * v_err * dt;
+        _thetaTrim -= k_leak * _thetaTrim * dt;
+    }
     _thetaTrim = clampf(_thetaTrim, theta_trim_max);
     
     /* Final theta reference = equilibrium + trim */
     float theta_ref_final = thetaRef + _thetaTrim;
-    theta_ref_final = clampf(theta_ref_final, _lqr.theta_ref_limit);
+    if (theta_ref_limit_eff > 0.0f) {
+        const float lo = thetaRef - theta_ref_limit_eff;
+        const float hi = thetaRef + theta_ref_limit_eff;
+        if (theta_ref_final < lo) theta_ref_final = lo;
+        if (theta_ref_final > hi) theta_ref_final = hi;
+    }
     _thetaRefFromPos = _thetaTrim;  /* For diagnostics */
     
     /* === 3. FAST INNER LQR === */
@@ -322,6 +516,19 @@ void MotionController::resetPidState()
     _prevUSumValid = false;
     _velIntegral = 0.0f;
     _thetaTrim = 0.0f;
+    _cruiseMode = false;
+    _cruiseAlpha = 0.0f;
+    _turnSuppressActive = false;
+    _turnInPlaceActive = false;
+    _turnK0Scale = 1.0f;
+    _stopModeActive = false;
+    _stopModeArmed = (fabsf(_targetVel) >= kStopReengageCmdMps);
+    _stopModeVRef = 0.0f;
+    _prevTargetVelCmd = _targetVel;
+    _k0Eff = _lqr.K[0];
+    _vRefLimitEff = (_lqr.v_ref_limit > 0.0f) ? _lqr.v_ref_limit : 100.0f;
+    _thetaRefLimitEff = _lqr.theta_ref_limit;
+    _yawDampEff = _yawDampGain;
     _diag = InnerCtrlDiag{};
     _diagValid = false;
 }
@@ -401,6 +608,44 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     Command cmd{};
     cmd.torque = {0.0f, 0.0f};
 
+    const bool stop_just_exited = updateStopMode(state.xDot, dtSeconds);
+    const float targetVelCtrl = _stopModeActive ? _stopModeVRef : _targetVel;
+    updateCruiseSchedule(targetVelCtrl, state.xDot, dtSeconds);
+
+    const bool was_turn_in_place = _turnInPlaceActive;
+
+    /* Turn-aware K0 suppression with hysteresis. */
+    const float abs_turn_cmd = fabsf(_teleopTurn);
+    const float abs_yaw_rate = fabsf(_lastYawRate);
+    if (_turnSuppressActive) {
+        if (abs_turn_cmd <= kTurnSuppressExitCmd &&
+            abs_yaw_rate <= kTurnSuppressExitYawRadS) {
+            _turnSuppressActive = false;
+        }
+    } else if (abs_turn_cmd >= kTurnSuppressEnterCmd ||
+               abs_yaw_rate >= kTurnSuppressEnterYawRadS) {
+        _turnSuppressActive = true;
+    }
+
+    float turn_suppress_alpha = 0.0f;
+    if (_turnSuppressActive) {
+        const float denom_cmd = fmaxf(kTurnSuppressFullCmd - kTurnSuppressExitCmd, kGainEpsilon);
+        const float denom_yaw =
+            fmaxf(kTurnSuppressFullYawRadS - kTurnSuppressExitYawRadS, kGainEpsilon);
+        const float cmd_alpha = clamp01((abs_turn_cmd - kTurnSuppressExitCmd) / denom_cmd);
+        const float yaw_alpha =
+            clamp01((abs_yaw_rate - kTurnSuppressExitYawRadS) / denom_yaw);
+        turn_suppress_alpha = fmaxf(cmd_alpha, yaw_alpha);
+    }
+
+    _turnInPlaceActive = _turnSuppressActive &&
+                         fabsf(targetVelCtrl) <= kInPlaceTurnVRefMaxMps;
+    if (_turnInPlaceActive) {
+        turn_suppress_alpha = 1.0f;
+    }
+    _turnK0Scale = 1.0f - clamp01(turn_suppress_alpha);
+    const bool turn_in_place_just_exited = was_turn_in_place && !_turnInPlaceActive;
+
     /* ========== PID u_sum computation (always computed for blending) ========== */
 
     /* Compute velocity PID integral limit:
@@ -415,7 +660,7 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
 
     float pitchTarget = computePid(
         _velocityPid,
-        _targetVel,
+        targetVelCtrl,
         state.xDot,
         dtSeconds,
         _velPid_Kp, _velPid_Ki, _velPid_Kd,
@@ -490,7 +735,7 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     bool crossAntiWindupActive = false;
     if (saturated)
     {
-        float velocityError = _targetVel - state.xDot;
+        float velocityError = targetVelCtrl - state.xDot;
         bool velIntegralMakesWorse = false;
 
         if (outputPreSat > outputLimit && velocityError < 0.0f)
@@ -525,18 +770,22 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
         _xRef = state.x;
         _xRefValid = true;
     } else {
-        // Track position reference when a non-zero velocity command is present.
-        if (fabsf(_targetVel) > 1e-4f) {
-            _xRef += _targetVel * dtSeconds;
+        if (stop_just_exited || turn_in_place_just_exited) {
+            // After stop-mode or turn-mode exit, anchor at current pose to
+            // prevent a delayed K0 pull-back transient.
+            _xRef = state.x;
+            _thetaTrim = 0.0f;
+        } else if (_turnInPlaceActive) {
+            // Freeze reference integration during in-place turns.
+        } else if (fabsf(targetVelCtrl) > 1e-4f) {
+            // Track position reference while moving, including stop-mode deceleration.
+            _xRef += targetVelCtrl * dtSeconds;
         }
     }
 
     float thetaRef = _thetaRef;
-    if (_lqr.theta_ref_limit > 0.0f) {
-        thetaRef = clampf(thetaRef, _lqr.theta_ref_limit);
-    }
-    /* LQR uses theta_ref from equilibrium LUT and v_ref=_targetVel */
-    float uSumLqrNm = computeLqrUSumNm(state, _targetVel, thetaRef) + _uEq;
+    /* LQR uses theta_ref from equilibrium LUT and effective velocity reference. */
+    float uSumLqrNm = computeLqrUSumNm(state, targetVelCtrl, thetaRef) + _uEq;
     float uSumPidNm = 0.0f;
     if (_motorKt > kGainEpsilon) {
         uSumPidNm = uSumPid * _motorKt;
@@ -558,16 +807,7 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     _prevUSum = uSum;
     _prevUSumValid = true;
 
-    /* ========== Yaw differential (unchanged) ========== */
-
-    float uTurnIq = _turnGain * _teleopTurn - _yawDampGain * _lastYawRate;
-    float uTurn = (_motorKt > kGainEpsilon) ? (uTurnIq * _motorKt) : 0.0f;
-
-    /* ========== Mix u_sum and u_diff into wheel commands ========== */
-
-    ControlOutput out;
-    out.torqueLeftNm = uSum - uTurn;
-    out.torqueRightNm = uSum + uTurn;
+    /* ========== Torque limits ========== */
 
     float maxTorque = 0.0f;
     float maxTorqueIq = 0.0f;
@@ -585,6 +825,42 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     float lqrTorqueLimit = (_lqr.u_limit > 0.0f) ? _lqr.u_limit : 0.0f;
 
     float effectiveLimit = (_alpha > 0.5f) ? lqrTorqueLimit : maxTorque;
+
+    /* ========== Yaw differential with headroom governor ========== */
+
+    // Yaw split is in torque units (Nm), consistent with uSum.
+    const float yaw_damp_eff = _yawDampGain *
+        (_speedSchedule.enabled
+             ? lerpf(1.0f, _speedSchedule.yaw_damp_cruise_mult, _cruiseAlpha)
+             : 1.0f);
+    _yawDampEff = yaw_damp_eff;
+
+    float uTurnCmd = _turnGain * _teleopTurn;
+    const float uTurnDamp = -yaw_damp_eff * _lastYawRate;
+    if (effectiveLimit > 0.0f) {
+        float uTurnLimit = effectiveLimit - fabsf(uSum);
+        if (uTurnLimit < 0.0f) uTurnLimit = 0.0f;
+        float cmdBudget = uTurnLimit - fabsf(uTurnDamp) - kYawHeadroomReserveNm;
+        if (cmdBudget < 0.0f) cmdBudget = 0.0f;
+        uTurnCmd = clampf(uTurnCmd, cmdBudget);
+    }
+    float uTurn = uTurnCmd + uTurnDamp;
+
+    /* ========== Mix u_sum and u_diff into wheel commands ========== */
+
+    ControlOutput out;
+    out.torqueLeftNm = uSum - uTurn;
+    out.torqueRightNm = uSum + uTurn;
+
+    // Final hard bound for safety.
+    if (effectiveLimit > 0.0f) {
+        float uTurnLimit = effectiveLimit - fabsf(uSum);
+        if (uTurnLimit < 0.0f) uTurnLimit = 0.0f;
+        if (uTurn > uTurnLimit) uTurn = uTurnLimit;
+        if (uTurn < -uTurnLimit) uTurn = -uTurnLimit;
+        out.torqueLeftNm = uSum - uTurn;
+        out.torqueRightNm = uSum + uTurn;
+    }
 
     _lastSaturated = false;
     _diag.sat_left = false;
@@ -607,6 +883,13 @@ MotionController::computeControl(const StateEstimate& state, float dtSeconds)
     _diag.alpha = _alpha;
     _diag.theta_ref_pos = _thetaRefFromPos;
     _diag.x_err = _lastXErr;
+    _diag.cruise_alpha = _cruiseAlpha;
+    _diag.k0_eff = _k0Eff;
+    _diag.v_ref_limit_eff = _vRefLimitEff;
+    _diag.theta_ref_limit_eff = _thetaRefLimitEff;
+    _diag.yaw_damp_eff = _yawDampEff;
+    _diag.cruise_mode = _cruiseMode;
+    _diag.stop_mode_active = _stopModeActive;
     _diag.fallback_to_pid = false;
     _diag.cross_antiwindup_active = crossAntiWindupActive;
     _diag.requested_mode = _requestedMode;

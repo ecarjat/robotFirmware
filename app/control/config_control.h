@@ -135,7 +135,11 @@
 #define PARAM_MAX_VOLTAGE      5.0f
 #define PARAM_GRAVITY          9.81f
 #define PARAM_MAX_WHEEL_TORQUE 6.0f
+#ifdef APP_CONFIG_SIM_FAST
+#define PARAM_MAX_FORWARD_VEL  3.0f
+#else
 #define PARAM_MAX_FORWARD_VEL  0.6f
+#endif
 #define PARAM_MAX_TURN_TORQUE  0.6f
 
 #define PARAM_MAX_WHEEL_VELOCITY (PARAM_MAX_FORWARD_VEL / PARAM_WHEEL_RADIUS)
@@ -160,10 +164,22 @@
 #define LQR_K3_THETADOT  (-24.0f)   /* Pitch rate gain (Nm/(rad/s)) */
 
 /* LQR limits */
-#define LQR_U_LIMIT            5.0f  /* Max |u_sum| (Nm) */
-#define LQR_DU_LIMIT           10.0f   /* Max |du_sum| per second (Nm/s) */
+#define LQR_U_LIMIT            34.0f  /* Max |u_sum| (Nm) - matches 34.67Nm motor peak */
+#define LQR_DU_LIMIT           100.0f  /* Max |du_sum| per second (Nm/s) - increased for fast response */
 #define LQR_THETA_REF_LIMIT    0.01f    /* Max |theta_ref| from vel loop (rad, ~0.57°) */
 #define LQR_V_REF_LIMIT        2.0f     /* Max |v_ref| from position loop (m/s) */
+
+/* LQR speed scheduling defaults (rest <-> cruise) */
+#define LQR_SPEED_SCHED_ENABLE              1
+#define LQR_CRUISE_ENTER_CMD_MPS            0.60f
+#define LQR_CRUISE_EXIT_CMD_MPS             0.25f
+#define LQR_CRUISE_ENTER_MEAS_MPS           0.50f
+#define LQR_CRUISE_EXIT_MEAS_MPS            0.20f
+#define LQR_CRUISE_BLEND_TAU_S              0.25f
+#define LQR_VREF_MARGIN_MPS                 0.30f
+#define LQR_THETA_LIMIT_REST_CAP_RAD        0.08f
+#define LQR_THETA_LIMIT_CRUISE_CAP_RAD      0.12f
+#define LQR_YAW_DAMP_CRUISE_MULT            2.0f
 
 /* Mode switching ramp times */
 #define LQR_ENGAGE_RAMP_MS     200U     /* PID→LQR blend time (ms) */

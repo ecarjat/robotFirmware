@@ -70,7 +70,6 @@ static uint32_t s_last_imu_irq_ms = 0U;
 static uint32_t s_last_motor_ok_ms = 0U;
 static float s_control_dt = CONTROL_DT;
 static uint32_t s_last_hip_coord_ms = 0U;
-static uint32_t s_last_lqr_lut_ms = 0U;
 static hip_behavior_mode_t s_hip_behavior_mode = HIP_BEHAVIOR_NORMAL;
 
 /* Last control output for telemetry */
@@ -121,6 +120,44 @@ void motion_control_apply_params(void)
 #if HIP_CONTROL_ENABLE
     hip_control_apply_params(&g_robot_params);
 #endif
+}
+
+static void motion_control_update_lqr_from_hips(const hip_state_t *hip_left,
+                                                const hip_state_t *hip_right)
+{
+    float hip_theta = 0.0f;
+    int hip_count = 0;
+    if (hip_left != NULL && hip_left->valid) {
+        hip_theta += hip_left->theta_rad;
+        hip_count++;
+    }
+    if (hip_right != NULL && hip_right->valid) {
+        hip_theta += hip_right->theta_rad;
+        hip_count++;
+    }
+    if (hip_count <= 0) {
+        return;
+    }
+
+    hip_theta /= (float)hip_count;
+    float K_lut[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float theta_eq = 0.0f;
+    float u_eq = 0.0f;
+    if (!lqr_lut_eval_full(hip_theta, K_lut, &theta_eq, &u_eq)) {
+        return;
+    }
+
+    lqr_params_t lqr = g_robot_params.lqr;
+    /* Cascaded architecture: K[0] is position-to-theta gain (Kx).
+     * Keep K[0] from config (not LUT) for now — LUT was tuned
+     * for direct 4-state where K[0] was position-to-torque.
+     * Inner loop gains K[1,2,3] can still be gain-scheduled. */
+    for (int i = 1; i < 4; ++i) {
+        lqr.K[i] = K_lut[i];
+    }
+    s_controller.setLqrParams(lqr);
+    /* Apply equilibrium pitch and feedforward torque from LUT. */
+    s_controller.setLqrEquilibrium(theta_eq, u_eq);
 }
 
 static bool motion_control_build_primary(ImuReading &out, uint32_t now_ms)
@@ -555,6 +592,9 @@ void motion_control_tick(uint32_t now_ms)
             hip_state_t hip_left{};
             hip_state_t hip_right{};
             hip_control_get_state(&hip_left, &hip_right);
+            /* Update gain schedule/equilibrium every control cycle to reduce
+             * hip-motion transient lag in theta_eq. */
+            motion_control_update_lqr_from_hips(&hip_left, &hip_right);
             float hip_height_dot = 0.0f;
             int hip_count = 0;
             if (hip_left.valid) {
@@ -647,39 +687,6 @@ void motion_control_tick(uint32_t now_ms)
         hip_state_t hip_left{};
         hip_state_t hip_right{};
         hip_control_get_state(&hip_left, &hip_right);
-        if (s_last_lqr_lut_ms == 0U || (now_ms - s_last_lqr_lut_ms) >= 20U) {
-            s_last_lqr_lut_ms = now_ms;
-            float hip_theta = 0.0f;
-            int hip_count = 0;
-            if (hip_left.valid) {
-                hip_theta += hip_left.theta_rad;
-                hip_count++;
-            }
-            if (hip_right.valid) {
-                hip_theta += hip_right.theta_rad;
-                hip_count++;
-            }
-            if (hip_count > 0) {
-                hip_theta /= (float)hip_count;
-                float K_lut[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                float theta_eq = 0.0f;
-                float u_eq = 0.0f;
-                if (lqr_lut_eval_full(hip_theta, K_lut, &theta_eq, &u_eq)) {
-                    lqr_params_t lqr = g_robot_params.lqr;
-                    /* Cascaded architecture: K[0] is position-to-theta gain (Kx).
-                     * Keep K[0] from config (not LUT) for now — LUT was tuned
-                     * for direct 4-state where K[0] was position-to-torque.
-                     * Inner loop gains K[1,2,3] can still be gain-scheduled. */
-                    /* lqr.K[0] = K_lut[0]; -- skip: keep config value */
-                    for (int i = 1; i < 4; ++i) {
-                        lqr.K[i] = K_lut[i];
-                    }
-                    s_controller.setLqrParams(lqr);
-                    /* Apply equilibrium pitch and feedforward torque from LUT */
-                    s_controller.setLqrEquilibrium(theta_eq, u_eq);
-                }
-            }
-        }
         hip_target_t target{};
         hip_behavior_tick(now_ms,
                           motion_modes_get(),
