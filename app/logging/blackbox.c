@@ -74,12 +74,16 @@ static uint32_t s_next_erase_addr = LOG_RING_START;
 static uint32_t s_last_meta_update_ms = 0;
 static uint32_t s_boot_count = 0;
 static uint32_t s_last_dump_id = 0;
+/* Sequence of the last metadata record verified in flash. */
 static uint32_t s_meta_sequence = 0;
+static uint32_t s_meta_candidate_sequence = 0;
+static bool s_meta_has_valid = false;
 
 typedef enum {
   LOG_META_SAVE_IDLE = 0,
   LOG_META_SAVE_ERASE,
-  LOG_META_SAVE_WRITE
+  LOG_META_SAVE_WRITE,
+  LOG_META_SAVE_VERIFY
 } log_meta_save_state_t;
 
 typedef enum {
@@ -92,6 +96,8 @@ static log_meta_save_state_t s_meta_save_state = LOG_META_SAVE_IDLE;
 static log_meta_op_t s_meta_op_inflight = LOG_META_OP_NONE;
 static uint32_t s_meta_slot_addr = LOG_META_SLOT0;
 static LogMeta s_meta_pending
+    BLACKBOX_DMA_BUFFER;
+static LogMeta s_meta_verify
     BLACKBOX_DMA_BUFFER;
 
 /* Statistics */
@@ -131,11 +137,55 @@ static bool log_flush_write_chunk(void);
 static void log_advance_write_addr_after_chunk(void);
 static uint16_t log_rate_from_params(const robot_params_t *params);
 static void log_meta_tick(qspi_w25q64_async_state_t async_state);
+static bool log_meta_sequence_is_newer(uint32_t candidate, uint32_t reference);
+static void log_meta_save_failed(void);
 static bool log_erase_ahead_ready(void);
 static void log_note_qspi_error(void);
 static bool log_write_chunk_contains_seq(uint32_t seq);
 static void log_capture_note_write_error(void);
 static void log_capture_note_write_complete(void);
+
+#if defined(BLACKBOX_TESTING)
+/* Simulate a cold firmware restart without discarding the fake QSPI contents. */
+void log_test_reset(void) {
+  memset(s_log_queue, 0, sizeof(s_log_queue));
+  s_queue_head = 0;
+  s_queue_tail = 0;
+  s_dropped_records = 0;
+
+  s_write_addr = LOG_RING_START;
+  s_write_addr_at_boot = LOG_RING_START;
+  s_wrap_count = 0;
+  s_next_seq = 0;
+  s_total_records = 0;
+  memset(&s_capture, 0, sizeof(s_capture));
+  s_next_erase_addr = LOG_RING_START;
+
+  s_last_meta_update_ms = 0;
+  s_boot_count = 0;
+  s_last_dump_id = 0;
+  s_meta_sequence = 0;
+  s_meta_candidate_sequence = 0;
+  s_meta_has_valid = false;
+  s_meta_save_state = LOG_META_SAVE_IDLE;
+  s_meta_op_inflight = LOG_META_OP_NONE;
+  s_meta_slot_addr = LOG_META_SLOT0;
+  memset(&s_meta_pending, 0, sizeof(s_meta_pending));
+  memset(&s_meta_verify, 0, sizeof(s_meta_verify));
+
+  s_qspi_write_errors = 0;
+  s_qspi_error_signaled = false;
+  s_log_fields_mask = LOG_FIELDS_MASK_DEFAULT;
+  s_log_rate_hz = 0U;
+  memset(s_write_chunk, 0, sizeof(s_write_chunk));
+  s_write_chunk_len = 0;
+  s_write_state = LOG_WRITE_IDLE;
+  s_write_chunk_start_addr = LOG_RING_START;
+  s_write_chunk_first_len = 0;
+  s_write_chunk_second_len = 0;
+  s_initialized = false;
+}
+#endif
 
 void log_init(const robot_params_t *params) {
   if (s_initialized) {
@@ -277,7 +327,7 @@ void log_writer_tick(void) {
   }
 
   log_meta_tick(async_state);
-  if (s_meta_op_inflight != LOG_META_OP_NONE) {
+  if (s_meta_save_state != LOG_META_SAVE_IDLE) {
     /* Meta saves block the writer; queued records may drop if the queue fills. */
     return;
   }
@@ -422,6 +472,11 @@ void log_writer_tick(void) {
 
 void log_erase_tick(void) {
   if (!s_initialized) {
+    return;
+  }
+
+  /* Keep the metadata readback/commit sequence exclusive on QSPI. */
+  if (s_meta_save_state != LOG_META_SAVE_IDLE) {
     return;
   }
 
@@ -669,22 +724,25 @@ static bool log_load_meta(void) {
   LogMeta meta0, meta1;
   bool valid0 = false, valid1 = false;
 
+  /* Slot parity is part of the layout: it identifies the inactive sector. */
   /* Read slot 0 */
   if (qspi_w25q64_read(LOG_META_SLOT0, (uint8_t *)&meta0, sizeof(LogMeta))) {
-    valid0 = log_validate_meta(&meta0);
+    valid0 = log_validate_meta(&meta0) && ((meta0.sequence & 1U) == 0U);
   }
 
   /* Read slot 1 */
   if (qspi_w25q64_read(LOG_META_SLOT1, (uint8_t *)&meta1, sizeof(LogMeta))) {
-    valid1 = log_validate_meta(&meta1);
+    valid1 = log_validate_meta(&meta1) && ((meta1.sequence & 1U) != 0U);
   }
 
   /* Choose newest valid slot by sequence number */
   const LogMeta *chosen = NULL;
 
   if (valid0 && valid1) {
-    /* Both valid - choose newer */
-    chosen = (meta1.sequence > meta0.sequence) ? &meta1 : &meta0;
+    /* Both valid - choose newer, including sequence counter rollover. */
+    chosen = log_meta_sequence_is_newer(meta1.sequence, meta0.sequence) ?
+                 &meta1 :
+                 &meta0;
   } else if (valid0) {
     chosen = &meta0;
   } else if (valid1) {
@@ -701,6 +759,7 @@ static bool log_load_meta(void) {
   s_boot_count = chosen->boot_count;
   s_last_dump_id = chosen->last_dump_id;
   s_meta_sequence = chosen->sequence;
+  s_meta_has_valid = true;
 
   return true;
 }
@@ -726,16 +785,19 @@ static bool log_save_meta(void) {
   meta->wrap_count = s_wrap_count;
   meta->boot_count = s_boot_count;
   meta->last_dump_id = s_last_dump_id;
-  meta->sequence = s_meta_sequence++;  /* Post-increment: use current, then increment */
+  s_meta_candidate_sequence =
+      s_meta_has_valid ? s_meta_sequence + 1U : 0U;
+  meta->sequence = s_meta_candidate_sequence;
 
   /* Compute CRC */
   meta->meta_crc32 =
       robot_crc32((const uint8_t *)meta, sizeof(LogMeta) - sizeof(uint32_t));
 
-  /* Write to alternating slot */
-  s_meta_slot_addr = (meta->sequence % 2 == 0) ? LOG_META_SLOT0 : LOG_META_SLOT1;
-  s_meta_save_state =
-      ((meta->sequence % 2) == 0) ? LOG_META_SAVE_ERASE : LOG_META_SAVE_WRITE;
+  /* The candidate always uses the inactive physical erase sector. */
+  s_meta_slot_addr = ((meta->sequence & 1U) == 0U) ?
+                         LOG_META_SLOT0 :
+                         LOG_META_SLOT1;
+  s_meta_save_state = LOG_META_SAVE_ERASE;
 
   return true;
 }
@@ -752,11 +814,10 @@ static void log_meta_tick(qspi_w25q64_async_state_t async_state) {
         s_meta_save_state = LOG_META_SAVE_WRITE;
       } else {
         s_meta_op_inflight = LOG_META_OP_NONE;
-        s_meta_save_state = LOG_META_SAVE_IDLE;
+        s_meta_save_state = LOG_META_SAVE_VERIFY;
       }
     } else if (async_state == QSPI_W25Q64_ASYNC_ERROR) {
-      s_meta_op_inflight = LOG_META_OP_NONE;
-      s_meta_save_state = LOG_META_SAVE_IDLE;
+      log_meta_save_failed();
     }
     return;
   }
@@ -770,16 +831,45 @@ static void log_meta_tick(qspi_w25q64_async_state_t async_state) {
   }
 
   if (s_meta_save_state == LOG_META_SAVE_ERASE) {
-    if (qspi_w25q64_erase_sector_async_start(LOG_META_START)) {
+    if (qspi_w25q64_erase_sector_async_start(s_meta_slot_addr)) {
       s_meta_op_inflight = LOG_META_OP_ERASE;
+    } else {
+      log_meta_save_failed();
     }
   } else if (s_meta_save_state == LOG_META_SAVE_WRITE) {
     if (qspi_w25q64_write_async_start(s_meta_slot_addr,
                                      (const uint8_t *)&s_meta_pending,
                                      sizeof(s_meta_pending))) {
       s_meta_op_inflight = LOG_META_OP_WRITE;
+    } else {
+      log_meta_save_failed();
     }
+  } else if (s_meta_save_state == LOG_META_SAVE_VERIFY) {
+    bool read_ok = qspi_w25q64_read(s_meta_slot_addr,
+                                    (uint8_t *)&s_meta_verify,
+                                    sizeof(s_meta_verify));
+    if (!read_ok || !log_validate_meta(&s_meta_verify) ||
+        memcmp(&s_meta_verify, &s_meta_pending, sizeof(s_meta_verify)) != 0) {
+      log_meta_save_failed();
+      return;
+    }
+
+    /* The new copy is now durable; it becomes the source for the next save. */
+    s_meta_sequence = s_meta_candidate_sequence;
+    s_meta_has_valid = true;
+    s_meta_save_state = LOG_META_SAVE_IDLE;
   }
+}
+
+static bool log_meta_sequence_is_newer(uint32_t candidate, uint32_t reference) {
+  return candidate != reference &&
+         (candidate - reference) < UINT32_C(0x80000000);
+}
+
+static void log_meta_save_failed(void) {
+  s_meta_op_inflight = LOG_META_OP_NONE;
+  s_meta_save_state = LOG_META_SAVE_IDLE;
+  log_note_qspi_error();
 }
 
 static bool log_validate_meta(const LogMeta *meta) {
@@ -867,12 +957,11 @@ static void log_format_meta(void) {
   s_boot_count = 0;
   s_last_dump_id = 0;
   s_meta_sequence = 0;
+  s_meta_candidate_sequence = 0;
+  s_meta_has_valid = false;
   s_meta_save_state = LOG_META_SAVE_IDLE;
   s_meta_op_inflight = LOG_META_OP_NONE;
   s_next_erase_addr = LOG_RING_START;
-
-  /* Save initial metadata */
-  log_save_meta();
 }
 
 static bool log_erase_ahead_ready(void) {

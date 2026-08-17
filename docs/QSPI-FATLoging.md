@@ -76,8 +76,9 @@ Because H7 has DCache and MDMA bypasses it:
 Reserve QSPI for logs only (simplest). If you need other use later, carve partitions.
 
 ### 3.1 Partitions
-- **[0x000000 .. 0x000FFF] 4 KiB**  : `LOG_META` (metadata, config, pointers, recovery info)
-- **[0x001000 .. 0x7FFFFF] ~8188 KiB**: `LOG_RING` (circular record storage)
+- **[0x000000 .. 0x000FFF] 4 KiB**  : `LOG_META_SLOT0` (metadata, config, pointers, recovery info)
+- **[0x001000 .. 0x001FFF] 4 KiB**  : `LOG_META_SLOT1` (independent recovery copy)
+- **[0x002000 .. 0x7FFFFF] ~8184 KiB**: `LOG_RING` (circular record storage)
 
 All addresses are offsets from QSPI base.
 
@@ -129,7 +130,7 @@ Fields (little-endian):
 - `rate_hz_u16`
 - `log_fields_mask_u32` (copy of `robot_params_t.log_fields_mask`)
 - `reserved_u16`
-- `ring_start_u32` (= 0x001000)
+- `ring_start_u32` (= 0x002000)
 - `ring_size_u32` (= total bytes in LOG_RING)
 - `write_addr_u32` (next write position within LOG_RING)
 - `wrap_count_u32` (increments each wrap)
@@ -144,7 +145,10 @@ Update policy:
   - periodically (e.g., 1 Hz)
   - on dump event
 - Use **two-slot meta** with sequence numbers to survive power loss:
-  - `LOG_META_SLOT0` and `LOG_META_SLOT1` (each 2 KiB) inside LOG_META sector.
+  - `LOG_META_SLOT0` and `LOG_META_SLOT1` each occupy their own 4 KiB erase sector.
+  - Erase only the inactive slot, program the candidate, and read it back with
+    CRC validation before treating it as committed; the previously verified
+    slot remains intact throughout the update.
 
 #### 4.3.2 `LogRecord` (stored in LOG_RING)
 Recommended to keep as compact as practical.
@@ -302,7 +306,7 @@ Write a binary file to SD:
 - `log_init(const robot_params_t* params)`:
   - init QSPI driver
   - load `LogMeta` from meta slots (choose newest valid by sequence + crc)
-  - if invalid, format LOG_META and LOG_RING (erase ring optionally in background)
+  - if invalid, reset the metadata and begin a fresh ring (pre-erase in background)
   - set `write_addr`
   - start tasks (logger, erase)
 

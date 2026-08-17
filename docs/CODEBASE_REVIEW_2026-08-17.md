@@ -26,7 +26,7 @@ still require target testing.
 |---|---|---|---|
 | P0 | Fixed | Blackbox dumping could run while balancing | Storage operations could block the foreground control loop. |
 | P0 | Fixed | Raw RPC parameters were not semantically validated | A valid frame could apply NaN, infinity, or unsafe limits/gains. |
-| P1 | Open | Redundant blackbox metadata shares one erase sector | Power loss can invalidate both copies and lose the ring pointer. |
+| P1 | Fixed | Redundant blackbox metadata shared one erase sector | Independent sectors preserve a verified recovery copy through an update. |
 | P1 | Open | Normal reboot command is a no-op | Reboot payload 0 does not enter the normal reboot path. |
 | P1 | Open | Any valid frame refreshes the control heartbeat | Non-control traffic can keep an armed robot alive. |
 | P1 | Open | CAN torque sends are change-driven, not watchdog-driven | Constant torque may not be refreshed after the first transmission. |
@@ -103,26 +103,22 @@ Recommended actions:
 4. Add tests for NaN, infinity, zero/negative limits, extreme rates, malformed
    matrices, and unsafe mode transitions.
 
-### P1 — Metadata is not power-loss redundant
+### P1 — Metadata is power-loss redundant
 
-The two claimed metadata slots are both in one 4 KiB erase sector:
-LOG_META_SLOT0 is 0x000000-0x0007ff and LOG_META_SLOT1 is
-0x000800-0x000fff (app/logging/blackbox_format.h:17-20). On alternating
-metadata saves, log_meta_tick erases LOG_META_START before writing the selected
-slot (app/logging/blackbox.c:606-614). That erase removes the old slot too.
+Status: fixed. `LOG_META_SLOT0` now occupies `0x000000-0x000fff` and
+`LOG_META_SLOT1` occupies `0x001000-0x001fff`; each is a separate 4 KiB erase
+sector. The ring begins at `0x002000`, reducing capacity by 4 KiB.
 
-A reset during erase/program can leave no valid metadata. The next boot calls
-log_format_meta when metadata cannot be loaded (app/logging/blackbox.c:697-709)
-and resets the write pointer, so later logs may overwrite existing ring data.
+The metadata save state machine erases only the inactive slot, programs the
+candidate, then reads it back and validates its CRC and full contents before
+committing the sequence. A failed operation retains the last verified sequence
+and retries the same inactive sector; newest-slot selection is wrap-safe across
+`UINT32_MAX` to zero. Host tests emulate NOR programming and power loss during
+target erase/program, plus failed readback verification and sequence rollover.
 
-Recommended actions:
-
-- Put each copy in a separate 4 KiB sector, or use an append-only journal with
-  a final commit marker.
-- Verify a new record before erasing the obsolete sector.
-- Make sequence comparison wrap-safe and inject power loss at every erase and
-  program step in tests.
-- Validate record CRC in log_validate_ring_tail, not just magic/version.
+This layout intentionally starts a fresh blackbox ring after the firmware
+upgrade: legacy metadata has the old ring geometry and is rejected. Record CRC
+validation in `log_validate_ring_tail` remains a separate follow-up.
 
 ### P1 — Normal reboot is never requested
 

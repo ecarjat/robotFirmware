@@ -9,15 +9,15 @@ extern "C" {
 
 /* Flash Memory Layout */
 #define LOG_META_START      0x000000U   /* Metadata start address */
-#define LOG_META_SIZE       0x001000U   /* 4 KB for metadata */
-#define LOG_RING_START      0x001000U   /* Ring buffer start */
-#define LOG_RING_SIZE       0x7FF000U   /* ~8188 KB ring buffer */
+#define LOG_META_SIZE       0x002000U   /* Two 4 KB metadata sectors */
+#define LOG_RING_START      0x002000U   /* Ring buffer start */
+#define LOG_RING_SIZE       0x7FE000U   /* ~8184 KB ring buffer */
 #define LOG_RING_END        (LOG_RING_START + LOG_RING_SIZE)
 
 /* Metadata dual-slot layout */
-#define LOG_META_SLOT0      0x000000U   /* Slot 0: 0x000000-0x0007FF (2 KB) */
-#define LOG_META_SLOT1      0x000800U   /* Slot 1: 0x000800-0x000FFF (2 KB) */
-#define LOG_META_SLOT_SIZE  0x000800U   /* 2 KB per slot */
+#define LOG_META_SLOT0      0x000000U   /* Slot 0: 0x000000-0x000FFF (4 KB) */
+#define LOG_META_SLOT1      0x001000U   /* Slot 1: 0x001000-0x001FFF (4 KB) */
+#define LOG_META_SLOT_SIZE  0x001000U   /* 4 KB per slot / erase sector */
 
 /* Log field bitmask (runtime configurable) */
 #define LOGF_IMU_RAW        (1u << 0)   /* acc_raw + gyro_raw from active IMU */
@@ -64,7 +64,7 @@ typedef struct __attribute__((packed)) {
   uint16_t rate_hz;            /* Log rate (typically 400 Hz) */
   uint32_t log_fields_mask;    /* Active LOGF_* fields */
   uint16_t reserved;
-  uint32_t ring_start;         /* LOG_RING_START = 0x001000 */
+  uint32_t ring_start;         /* LOG_RING_START = 0x002000 */
   uint32_t ring_size;          /* LOG_RING_SIZE */
   uint32_t write_addr;         /* Next write position in ring */
   uint32_t wrap_count;         /* Number of ring wraps */
