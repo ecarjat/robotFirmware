@@ -193,6 +193,33 @@ void app_rpc_handle(const robot_frame_t *frame) {
     app_rpc_send_param_resp(req.method, status, 0U, 0U, NULL, 0U, resp_seq);
     return;
   }
+  case ROBOT_RPC_METHOD_CAN_SIMPLE_SET_NODE_ID: {
+    if (req_data_len != sizeof(robot_rpc_can_simple_node_id_t)) {
+      app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_LEN, offset,
+                              length, NULL, 0U, resp_seq);
+      return;
+    }
+    robot_rpc_can_simple_node_id_t prog_req;
+    memcpy(&prog_req, req_data, sizeof(prog_req));
+    if (prog_req.current_node_id > ROBOT_CAN_SIMPLE_NODE_ID_MAX ||
+        prog_req.new_node_id > ROBOT_CAN_SIMPLE_NODE_ID_MAX) {
+      app_rpc_send_param_resp(req.method, ROBOT_RPC_STATUS_BAD_PARAM,
+                              prog_req.current_node_id, prog_req.new_node_id,
+                              NULL, 0U, resp_seq);
+      return;
+    }
+
+    bool save = ((prog_req.flags & ROBOT_CAN_SIMPLE_PROG_FLAG_SAVE) != 0U) ||
+                ((req.flags & ROBOT_RPC_FLAG_SAVE) != 0U);
+    uint8_t status =
+        hip_control_program_node_id(prog_req.current_node_id,
+                                    prog_req.new_node_id, save)
+            ? ROBOT_RPC_STATUS_OK
+            : ROBOT_RPC_STATUS_NOT_READY;
+    app_rpc_send_param_resp(req.method, status, prog_req.current_node_id,
+                            prog_req.new_node_id, NULL, 0U, resp_seq);
+    return;
+  }
   case ROBOT_RPC_METHOD_SET_PARAM: {
     float old_rate_hz = g_robot_params.control_rate_hz;
     if (length == 0U) {

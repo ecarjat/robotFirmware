@@ -40,10 +40,14 @@
  * Set input pos: float32 pos_rev + int16 vel_ff (rev/s*1000) + int16 torque_ff (Nm*1000)
  */
 #define HIP_CMD_SET_AXIS_STATE 0x007U
+#define HIP_CMD_SET_AXIS_NODE_ID 0x006U
 #define HIP_CMD_SET_CTRL_MODE  0x00BU
 #define HIP_CMD_SET_INPUT_POS  0x00CU
 #define HIP_CMD_GET_ENCODER    0x009U
 #define HIP_CMD_GET_TORQUES    0x01CU
+#define HIP_CMD_SAVE_CONFIG    0x01FU
+
+#define HIP_CAN_SIMPLE_NODE_ID_MAX 63U
 #define HIP_CMD_HEARTBEAT      0x001U
 
 #define HIP_CTRL_MODE_POSITION 3U
@@ -188,6 +192,26 @@ static void hip_set_axis_state(uint8_t node_id, uint8_t state) {
     (void)hip_send(node_id, HIP_CMD_SET_AXIS_STATE, data, 1U);
 }
 
+bool hip_control_program_node_id(uint8_t current_node_id, uint8_t new_node_id, bool save) {
+    if (current_node_id > HIP_CAN_SIMPLE_NODE_ID_MAX ||
+        new_node_id > HIP_CAN_SIMPLE_NODE_ID_MAX) {
+        return false;
+    }
+
+    uint32_t new_id = new_node_id;
+    uint8_t data[4] = {0};
+    memcpy(data, &new_id, sizeof(new_id));
+    if (!hip_send(current_node_id, HIP_CMD_SET_AXIS_NODE_ID, data, sizeof(data))) {
+        return false;
+    }
+
+    if (!save) {
+        return true;
+    }
+
+    return hip_send(new_node_id, HIP_CMD_SAVE_CONFIG, NULL, 0U);
+}
+
 static void hip_set_ctrl_mode(uint8_t node_id, uint8_t control_mode, uint8_t input_mode) {
     uint8_t data[8] = {0};
     data[0] = control_mode;
@@ -207,7 +231,7 @@ static void hip_set_input_pos(uint8_t node_id, float pos_rev, float vel_ff_rev_s
 }
 
 static uint8_t hip_read_limit(GPIO_TypeDef *port, uint16_t pin) {
-    return (HAL_GPIO_ReadPin(port, pin) == GPIO_PIN_RESET) ? 1U : 0U;
+    return (HAL_GPIO_ReadPin(port, pin) == GPIO_PIN_SET) ? 1U : 0U;
 }
 
 static void hip_update_limits(uint32_t now_ms) {

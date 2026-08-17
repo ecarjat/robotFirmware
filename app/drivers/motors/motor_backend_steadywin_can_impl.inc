@@ -4,17 +4,18 @@
 #include <string.h>
 
 #include "app_config.h"
+#include "app_log_macros.h"
 #include "hip_control.h"
 #include "main.h"
 #include "stm32h7xx_hal.h"
 #include "stm32h7xx_hal_fdcan.h"
 
 #ifndef MOTOR_LINK_TELEM_WARN_MS
-#define MOTOR_LINK_TELEM_WARN_MS 5U
+#define MOTOR_LINK_TELEM_WARN_MS 15U
 #endif
 
 #ifndef MOTOR_LINK_TELEM_STALE_MS
-#define MOTOR_LINK_TELEM_STALE_MS 10U
+#define MOTOR_LINK_TELEM_STALE_MS 30U
 #endif
 
 #ifndef MOTOR_LINK_KT_NM_PER_A
@@ -23,14 +24,6 @@
 
 #ifndef MOTOR_LINK_KV_RPM_PER_V
 #define MOTOR_LINK_KV_RPM_PER_V 0.0f
-#endif
-
-#ifndef MOTOR_LINK_ACK_TIMEOUT_MS
-#define MOTOR_LINK_ACK_TIMEOUT_MS 200U
-#endif
-
-#ifndef MOTOR_LINK_TELEM_RATE_HZ
-#define MOTOR_LINK_TELEM_RATE_HZ 500.0f
 #endif
 
 #ifndef MOTOR_LINK_TARGET_PERIOD_MS
@@ -47,15 +40,21 @@
 
 #define MOTOR_LINK_PI 3.14159265358979323846f
 
-#define MOTOR_LINK_CMD_CLEAR_FAULT 0xAFU
-#define MOTOR_LINK_CMD_DISABLE 0xCFU
-#define MOTOR_LINK_CMD_IQ 0xC0U
-#define MOTOR_LINK_CMD_SPEED 0xC1U
-#define MOTOR_LINK_CMD_POS_ABS 0xC2U
-#define MOTOR_LINK_CMD_POS_REL 0xC3U
-#define MOTOR_LINK_CMD_TELEM_COMPACT 0xA4U
-#define MOTOR_LINK_CMD_TELEM_SPEED 0xA2U
-#define MOTOR_LINK_CMD_STATUS 0xAEU
+/* GDS68 CAN Simple command IDs. Arbitration ID = (node_id << 5) | command. */
+#define MOTOR_LINK_CMD_SET_AXIS_STATE 0x007U
+#define MOTOR_LINK_CMD_GET_ENCODER_ESTIMATES 0x009U
+#define MOTOR_LINK_CMD_SET_CONTROLLER_MODE 0x00BU
+#define MOTOR_LINK_CMD_SET_INPUT_TORQUE 0x00EU
+#define MOTOR_LINK_CMD_CLEAR_ERRORS 0x018U
+
+#define MOTOR_LINK_AXIS_STATE_IDLE 1U
+#define MOTOR_LINK_AXIS_STATE_CLOSED_LOOP 8U
+#define MOTOR_LINK_CTRL_MODE_TORQUE 1U
+#define MOTOR_LINK_CTRL_MODE_VELOCITY 2U
+#define MOTOR_LINK_CTRL_MODE_POSITION 3U
+#define MOTOR_LINK_INPUT_MODE_PASSTHROUGH 1U
+#define MOTOR_LINK_INPUT_MODE_VEL_RAMP 2U
+#define MOTOR_LINK_INPUT_MODE_POS_FILTER 3U
 
 #define MOTOR_LINK_RX_RING_SIZE 32U
 
@@ -97,9 +96,6 @@ static float s_right_sent = 0.0f;
 static uint8_t s_left_sent_valid = 0U;
 static uint8_t s_right_sent_valid = 0U;
 static uint32_t s_last_target_ms = 0U;
-static uint32_t s_last_telem_req_ms = 0U;
-static motor_side_t s_next_telem_side = MOTOR_SIDE_LEFT;
-
 static motor_telem_t s_left_telem;
 static motor_telem_t s_right_telem;
 
@@ -261,25 +257,67 @@ static bool motor_link_can_send(uint16_t std_id, const uint8_t *data,
   return (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &tx, payload) == HAL_OK);
 }
 
-static bool motor_link_can_send_command(uint8_t dev_addr, uint8_t cmd,
-                                        const uint8_t *payload, uint8_t len) {
-  uint8_t data[8] = {0U};
-  uint8_t total_len = (uint8_t)(len + 1U);
-  if (total_len > 8U) {
-    return false;
-  }
-  data[0] = cmd;
-  if (payload != NULL && len > 0U) {
-    memcpy(&data[1], payload, len);
-  }
-  return motor_link_can_send((uint16_t)MOTOR_LINK_CAN_REQ_ID(dev_addr), data,
-                             total_len);
+static uint16_t motor_link_can_simple_id(uint8_t node_id, uint8_t cmd) {
+  return (uint16_t)(((uint16_t)(node_id & 0x3FU) << 5) | (cmd & 0x1FU));
 }
 
-static void motor_link_send_zero_iq(uint8_t dev_addr) {
-  uint8_t payload[4] = {0U, 0U, 0U, 0U};
-  (void)motor_link_can_send_command(dev_addr, MOTOR_LINK_CMD_IQ, payload,
-                                    sizeof(payload));
+static bool motor_link_can_send_command(uint8_t node_id, uint8_t cmd,
+                                        const uint8_t *payload, uint8_t len) {
+  return motor_link_can_send(motor_link_can_simple_id(node_id, cmd), payload,
+                             len);
+}
+
+static void motor_link_pack_u32(uint8_t *dst, uint32_t value) {
+  dst[0] = (uint8_t)(value & 0xFFU);
+  dst[1] = (uint8_t)((value >> 8) & 0xFFU);
+  dst[2] = (uint8_t)((value >> 16) & 0xFFU);
+  dst[3] = (uint8_t)((value >> 24) & 0xFFU);
+}
+
+static bool motor_link_set_axis_state(uint8_t node_id, uint32_t state) {
+  uint8_t payload[4] = {0U};
+  motor_link_pack_u32(payload, state);
+  return motor_link_can_send_command(node_id, MOTOR_LINK_CMD_SET_AXIS_STATE,
+                                     payload, sizeof(payload));
+}
+
+static bool motor_link_set_controller_mode(uint8_t node_id,
+                                           motor_control_mode_t mode) {
+  uint32_t control_mode = 0U;
+  uint32_t input_mode = 0U;
+  switch (mode) {
+  case MOTOR_CONTROL_TORQUE:
+    control_mode = MOTOR_LINK_CTRL_MODE_TORQUE;
+    input_mode = MOTOR_LINK_INPUT_MODE_PASSTHROUGH;
+    break;
+  case MOTOR_CONTROL_VELOCITY:
+    control_mode = MOTOR_LINK_CTRL_MODE_VELOCITY;
+    input_mode = MOTOR_LINK_INPUT_MODE_VEL_RAMP;
+    break;
+  case MOTOR_CONTROL_ANGLE:
+    control_mode = MOTOR_LINK_CTRL_MODE_POSITION;
+    input_mode = MOTOR_LINK_INPUT_MODE_POS_FILTER;
+    break;
+  default:
+    return false;
+  }
+
+  uint8_t payload[8] = {0U};
+  motor_link_pack_u32(&payload[0], control_mode);
+  motor_link_pack_u32(&payload[4], input_mode);
+  return motor_link_can_send_command(node_id, MOTOR_LINK_CMD_SET_CONTROLLER_MODE,
+                                     payload, sizeof(payload));
+}
+
+static bool motor_link_send_torque(uint8_t node_id, float torque_nm) {
+  uint8_t payload[4] = {0U};
+  memcpy(payload, &torque_nm, sizeof(torque_nm));
+  return motor_link_can_send_command(node_id, MOTOR_LINK_CMD_SET_INPUT_TORQUE,
+                                     payload, sizeof(payload));
+}
+
+static bool motor_link_send_zero_torque(uint8_t node_id) {
+  return motor_link_send_torque(node_id, 0.0f);
 }
 
 static void motor_link_update_velocity(motor_telem_t *telem, float vel_rad_s,
@@ -292,57 +330,41 @@ static void motor_link_update_velocity(motor_telem_t *telem, float vel_rad_s,
   telem->vel_valid = 1U;
 }
 
-static void motor_link_handle_telem_compact(motor_telem_t *telem,
-                                            const uint8_t *data, uint8_t len,
-                                            uint32_t t_ms) {
+static void motor_link_handle_encoder_estimate(motor_telem_t *telem,
+                                               const uint8_t *data, uint8_t len,
+                                               uint32_t t_ms) {
   if (telem == NULL || data == NULL || len < 8U) {
     return;
   }
-  int16_t speed_raw = (int16_t)((uint16_t)data[4] | ((uint16_t)data[5] << 8));
-  float rpm = (float)speed_raw * 0.01f;
-  float rad_s = rpm * (2.0f * MOTOR_LINK_PI / 60.0f);
-  motor_link_update_velocity(telem, rad_s, t_ms);
-}
-
-static void motor_link_handle_telem_speed(motor_telem_t *telem,
-                                          const uint8_t *data, uint8_t len,
-                                          uint32_t t_ms) {
-  if (telem == NULL || data == NULL || len < 5U) {
+  float velocity_rev_s = 0.0f;
+  memcpy(&velocity_rev_s, &data[4], sizeof(velocity_rev_s));
+  if (!isfinite(velocity_rev_s)) {
     return;
   }
-  int32_t speed_raw = (int32_t)((uint32_t)data[1] | ((uint32_t)data[2] << 8) |
-                                ((uint32_t)data[3] << 16) |
-                                ((uint32_t)data[4] << 24));
-  float rpm = (float)speed_raw * 0.01f;
-  float rad_s = rpm * (2.0f * MOTOR_LINK_PI / 60.0f);
+  float rad_s = velocity_rev_s * (2.0f * MOTOR_LINK_PI);
   motor_link_update_velocity(telem, rad_s, t_ms);
 }
 
 static void motor_link_process_frame(const motor_link_can_frame_t *frame) {
-  if (frame == NULL || frame->dlc == 0U) {
+  if (frame == NULL) {
     return;
   }
 
+  uint8_t node_id = (uint8_t)((frame->id >> 5) & 0x3FU);
   motor_telem_t *telem = NULL;
-  if (frame->id == MOTOR_LINK_CAN_LEFT_ID) {
+  if (node_id == MOTOR_LINK_CAN_LEFT_ID) {
     telem = &s_left_telem;
-  } else if (frame->id == MOTOR_LINK_CAN_RIGHT_ID) {
+  } else if (node_id == MOTOR_LINK_CAN_RIGHT_ID) {
     telem = &s_right_telem;
   } else {
     return;
   }
 
-  uint8_t cmd = frame->data[0];
+  uint8_t cmd = (uint8_t)(frame->id & 0x1FU);
   switch (cmd) {
-  case MOTOR_LINK_CMD_TELEM_COMPACT:
-    motor_link_handle_telem_compact(telem, frame->data, frame->dlc,
-                                    frame->t_ms);
-    break;
-  case MOTOR_LINK_CMD_TELEM_SPEED:
-    motor_link_handle_telem_speed(telem, frame->data, frame->dlc, frame->t_ms);
-    break;
-  case MOTOR_LINK_CMD_STATUS:
-    /* Status frame: currently unused beyond presence */
+  case MOTOR_LINK_CMD_GET_ENCODER_ESTIMATES:
+    motor_link_handle_encoder_estimate(telem, frame->data, frame->dlc,
+                                        frame->t_ms);
     break;
   default:
     break;
@@ -362,16 +384,16 @@ static bool motor_link_config_filters(void) {
   filter.IdType = FDCAN_STANDARD_ID;
   filter.FilterType = FDCAN_FILTER_MASK;
   filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-  filter.FilterID2 = 0x7FFU; /* Exact match mask */
+  filter.FilterID2 = 0x7E0U; /* Match all CAN Simple commands for one node. */
 
   filter.FilterIndex = 0U;
-  filter.FilterID1 = MOTOR_LINK_CAN_LEFT_ID;
+  filter.FilterID1 = ((uint32_t)MOTOR_LINK_CAN_LEFT_ID << 5);
   if (HAL_FDCAN_ConfigFilter(&hfdcan1, &filter) != HAL_OK) {
     return false;
   }
 
   filter.FilterIndex = 1U;
-  filter.FilterID1 = MOTOR_LINK_CAN_RIGHT_ID;
+  filter.FilterID1 = ((uint32_t)MOTOR_LINK_CAN_RIGHT_ID << 5);
   if (HAL_FDCAN_ConfigFilter(&hfdcan1, &filter) != HAL_OK) {
     return false;
   }
@@ -480,8 +502,6 @@ bool motor_link_init(void) {
   s_left_sent_valid = 0U;
   s_right_sent_valid = 0U;
   s_last_target_ms = 0U;
-  s_last_telem_req_ms = 0U;
-  s_next_telem_side = MOTOR_SIDE_LEFT;
 
   if (!motor_link_config_filters()) {
     return false;
@@ -496,7 +516,7 @@ bool motor_link_init(void) {
   }
 
   s_initialized = 1U;
-  APP_LOG_INFO("Motor link initialized (Steadywin CAN)");
+  APP_LOG_INFO("Motor link initialized (GDS68 CAN Simple)");
   return true;
 }
 
@@ -516,30 +536,8 @@ void motor_link_poll(void) {
     return;
   }
 
-  uint32_t now_ms = HAL_GetTick();
-  uint32_t period_ms = (uint32_t)(1000.0f / MOTOR_LINK_TELEM_RATE_HZ);
-  if (period_ms == 0U) {
-    period_ms = 1U;
-  }
-
-  if ((now_ms - s_last_telem_req_ms) < period_ms) {
-    return;
-  }
-
-  uint8_t addr = (s_next_telem_side == MOTOR_SIDE_LEFT) ? MOTOR_LINK_CAN_LEFT_ID
-                                                        : MOTOR_LINK_CAN_RIGHT_ID;
-  if (!motor_link_can_send_command(addr, MOTOR_LINK_CMD_TELEM_COMPACT, NULL,
-                                   0U)) {
-    if (addr == MOTOR_LINK_CAN_LEFT_ID) {
-      s_left_ack_timeouts++;
-    } else {
-      s_right_ack_timeouts++;
-    }
-  }
-
-  s_next_telem_side = (s_next_telem_side == MOTOR_SIDE_LEFT) ? MOTOR_SIDE_RIGHT
-                                                             : MOTOR_SIDE_LEFT;
-  s_last_telem_req_ms = now_ms;
+  /* Encoder estimates are periodic CAN Simple messages configured in the
+   * drive. There is no host request frame for command 0x009. */
 }
 
 bool motor_link_enable(bool on) {
@@ -552,32 +550,46 @@ bool motor_link_enable(bool on) {
   }
 
   bool was_enabled = (s_enable_applied != 0U);
+  bool ok = true;
 
   if (on) {
-    s_enable_applied = 1U;
     motor_link_apply_enable_gpio(true);
-    (void)motor_link_can_send_command(MOTOR_LINK_CAN_LEFT_ID,
-                                      MOTOR_LINK_CMD_CLEAR_FAULT, NULL, 0U);
-    (void)motor_link_can_send_command(MOTOR_LINK_CAN_RIGHT_ID,
-                                      MOTOR_LINK_CMD_CLEAR_FAULT, NULL, 0U);
-    motor_link_send_zero_iq(MOTOR_LINK_CAN_LEFT_ID);
-    motor_link_send_zero_iq(MOTOR_LINK_CAN_RIGHT_ID);
+    const uint8_t node_ids[2] = {MOTOR_LINK_CAN_LEFT_ID,
+                                 MOTOR_LINK_CAN_RIGHT_ID};
+    for (uint32_t i = 0U; i < 2U; ++i) {
+      uint8_t node_id = node_ids[i];
+      ok = motor_link_can_send_command(node_id, MOTOR_LINK_CMD_CLEAR_ERRORS,
+                                       NULL, 0U) &&
+           ok;
+      ok = motor_link_set_controller_mode(node_id, s_control_mode) && ok;
+      ok = motor_link_send_zero_torque(node_id) && ok;
+      ok = motor_link_set_axis_state(node_id, MOTOR_LINK_AXIS_STATE_CLOSED_LOOP) &&
+           ok;
+    }
+    s_enable_applied = ok ? 1U : 0U;
+    if (!ok) {
+      motor_link_apply_enable_gpio(false);
+    }
   } else {
     if (was_enabled) {
-      motor_link_send_zero_iq(MOTOR_LINK_CAN_LEFT_ID);
-      motor_link_send_zero_iq(MOTOR_LINK_CAN_RIGHT_ID);
+      ok = motor_link_send_zero_torque(MOTOR_LINK_CAN_LEFT_ID) && ok;
+      ok = motor_link_send_zero_torque(MOTOR_LINK_CAN_RIGHT_ID) && ok;
     }
+    ok = motor_link_set_axis_state(MOTOR_LINK_CAN_LEFT_ID,
+                                   MOTOR_LINK_AXIS_STATE_IDLE) &&
+         ok;
+    ok = motor_link_set_axis_state(MOTOR_LINK_CAN_RIGHT_ID,
+                                   MOTOR_LINK_AXIS_STATE_IDLE) &&
+         ok;
     s_left_cmd = 0.0f;
     s_right_cmd = 0.0f;
-    (void)motor_link_can_send_command(MOTOR_LINK_CAN_LEFT_ID,
-                                      MOTOR_LINK_CMD_DISABLE, NULL, 0U);
-    (void)motor_link_can_send_command(MOTOR_LINK_CAN_RIGHT_ID,
-                                      MOTOR_LINK_CMD_DISABLE, NULL, 0U);
     s_enable_applied = 0U;
+    s_left_sent_valid = 0U;
+    s_right_sent_valid = 0U;
     motor_link_apply_enable_gpio(false);
   }
 
-  return true;
+  return ok;
 }
 
 void motor_link_set_control_mode(motor_control_mode_t mode) {
@@ -590,6 +602,14 @@ void motor_link_set_control_mode(motor_control_mode_t mode) {
   case MOTOR_CONTROL_VELOCITY:
   case MOTOR_CONTROL_ANGLE:
     s_control_mode = mode;
+    if (s_enable_applied) {
+      (void)motor_link_set_controller_mode(MOTOR_LINK_CAN_LEFT_ID, mode);
+      (void)motor_link_set_controller_mode(MOTOR_LINK_CAN_RIGHT_ID, mode);
+      (void)motor_link_send_zero_torque(MOTOR_LINK_CAN_LEFT_ID);
+      (void)motor_link_send_zero_torque(MOTOR_LINK_CAN_RIGHT_ID);
+      s_left_sent_valid = 0U;
+      s_right_sent_valid = 0U;
+    }
     break;
   default:
     APP_LOG_WARN("Motor link: open-loop mode unsupported");
@@ -606,19 +626,20 @@ void motor_link_set_motor_directions(int8_t left_dir, int8_t right_dir) {
   s_right_dir = (right_dir < 0) ? -1 : 1;
 }
 
-void motor_link_set_wheel_Iq(float left_A, float right_A, float max_A) {
+static void motor_link_set_wheel_torque_commands(float left_Nm, float right_Nm,
+                                                 float max_Nm) {
   if (!s_initialized || s_control_mode != MOTOR_CONTROL_TORQUE) {
     return;
   }
 
-  if (!isfinite(left_A) || !isfinite(right_A) || !isfinite(max_A)) {
-    left_A = 0.0f;
-    right_A = 0.0f;
-    max_A = 0.0f;
+  if (!isfinite(left_Nm) || !isfinite(right_Nm) || !isfinite(max_Nm)) {
+    left_Nm = 0.0f;
+    right_Nm = 0.0f;
+    max_Nm = 0.0f;
   }
 
-  float left = motor_link_clamp(left_A * s_left_dir, max_A);
-  float right = motor_link_clamp(right_A * s_right_dir, max_A);
+  float left = motor_link_clamp(left_Nm * s_left_dir, max_Nm);
+  float right = motor_link_clamp(right_Nm * s_right_dir, max_Nm);
 
   s_left_cmd = left;
   s_right_cmd = right;
@@ -640,17 +661,8 @@ void motor_link_set_wheel_Iq(float left_A, float right_A, float max_A) {
     return;
   }
 
-  uint8_t payload[4];
-  int32_t left_raw = (int32_t)lrintf(left * 1000.0f);
-  int32_t right_raw = (int32_t)lrintf(right * 1000.0f);
-
   if (left_changed) {
-    payload[0] = (uint8_t)(left_raw & 0xFF);
-    payload[1] = (uint8_t)((left_raw >> 8) & 0xFF);
-    payload[2] = (uint8_t)((left_raw >> 16) & 0xFF);
-    payload[3] = (uint8_t)((left_raw >> 24) & 0xFF);
-    if (motor_link_can_send_command(MOTOR_LINK_CAN_LEFT_ID, MOTOR_LINK_CMD_IQ,
-                                    payload, sizeof(payload))) {
+    if (motor_link_send_torque(MOTOR_LINK_CAN_LEFT_ID, left)) {
       s_left_sent = left;
       s_left_sent_valid = 1U;
     } else {
@@ -659,12 +671,7 @@ void motor_link_set_wheel_Iq(float left_A, float right_A, float max_A) {
   }
 
   if (right_changed) {
-    payload[0] = (uint8_t)(right_raw & 0xFF);
-    payload[1] = (uint8_t)((right_raw >> 8) & 0xFF);
-    payload[2] = (uint8_t)((right_raw >> 16) & 0xFF);
-    payload[3] = (uint8_t)((right_raw >> 24) & 0xFF);
-    if (motor_link_can_send_command(MOTOR_LINK_CAN_RIGHT_ID, MOTOR_LINK_CMD_IQ,
-                                    payload, sizeof(payload))) {
+    if (motor_link_send_torque(MOTOR_LINK_CAN_RIGHT_ID, right)) {
       s_right_sent = right;
       s_right_sent_valid = 1U;
     } else {
@@ -675,26 +682,31 @@ void motor_link_set_wheel_Iq(float left_A, float right_A, float max_A) {
   s_last_target_ms = now_ms;
 }
 
+void motor_link_set_wheel_Iq(float left_A, float right_A, float max_A) {
+  if (!isfinite(left_A) || !isfinite(right_A) || !isfinite(max_A)) {
+    motor_link_set_wheel_torque_commands(0.0f, 0.0f, 0.0f);
+    return;
+  }
+
+  float kt = motor_link_resolve_kt();
+  if (kt <= 0.0f) {
+    APP_LOG_WARN("Motor link: cannot convert Iq to torque without motor Kt");
+    motor_link_set_wheel_torque_commands(0.0f, 0.0f, 0.0f);
+    return;
+  }
+
+  motor_link_set_wheel_torque_commands(left_A * kt, right_A * kt,
+                                       max_A * kt);
+}
+
 bool motor_backend_steadywin_can_torque_to_iq(float torque_nm, float *iq_out);
 
 void motor_link_set_wheel_torques(float left_Nm, float right_Nm, float max_Nm) {
   if (!isfinite(left_Nm) || !isfinite(right_Nm) || !isfinite(max_Nm)) {
-    motor_link_set_wheel_Iq(0.0f, 0.0f, 0.0f);
+    motor_link_set_wheel_torque_commands(0.0f, 0.0f, 0.0f);
     return;
   }
-
-  float left_A = 0.0f;
-  float right_A = 0.0f;
-  float max_A = 0.0f;
-  if (!motor_backend_steadywin_can_torque_to_iq(left_Nm, &left_A) ||
-      !motor_backend_steadywin_can_torque_to_iq(right_Nm, &right_A)) {
-    return;
-  }
-  if (max_Nm > 0.0f &&
-      !motor_backend_steadywin_can_torque_to_iq(max_Nm, &max_A)) {
-    max_A = 0.0f;
-  }
-  motor_link_set_wheel_Iq(left_A, right_A, max_A);
+  motor_link_set_wheel_torque_commands(left_Nm, right_Nm, max_Nm);
 }
 
 bool motor_backend_steadywin_can_torque_to_iq(float torque_nm, float *iq_out) {

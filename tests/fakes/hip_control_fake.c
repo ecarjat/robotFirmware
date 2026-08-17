@@ -6,6 +6,10 @@ static hip_command_t s_left_cmd = {0};
 static hip_command_t s_right_cmd = {0};
 static hip_target_t s_target = {0};
 static uint32_t s_faults = 0U;
+static bool s_program_result = true;
+static uint8_t s_program_current_node_id = 0U;
+static uint8_t s_program_new_node_id = 0U;
+static bool s_program_save = false;
 
 void hip_control_init(void)
 {
@@ -85,6 +89,14 @@ void hip_control_on_bus_recovered(void)
     s_faults &= ~(uint32_t)HIP_FAULT_BUS_OFF;
 }
 
+bool hip_control_program_node_id(uint8_t current_node_id, uint8_t new_node_id, bool save)
+{
+    s_program_current_node_id = current_node_id;
+    s_program_new_node_id = new_node_id;
+    s_program_save = save;
+    return s_program_result;
+}
+
 void hip_control_fake_set_states(const hip_state_t *left, const hip_state_t *right)
 {
     if (left) {
@@ -108,4 +120,22 @@ void hip_control_fake_set_commands(const hip_command_t *left, const hip_command_
 void hip_control_fake_set_faults(uint32_t faults)
 {
     s_faults = faults;
+}
+
+void hip_control_fake_set_program_result(bool result)
+{
+    s_program_result = result;
+}
+
+void hip_control_fake_get_program(uint8_t *current_node_id, uint8_t *new_node_id, bool *save)
+{
+    if (current_node_id) {
+        *current_node_id = s_program_current_node_id;
+    }
+    if (new_node_id) {
+        *new_node_id = s_program_new_node_id;
+    }
+    if (save) {
+        *save = s_program_save;
+    }
 }

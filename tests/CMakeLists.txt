@@ -174,6 +174,29 @@ target_link_libraries(test_hip_integration PRIVATE Catch2::Catch2WithMain)
 
 add_test(NAME test_hip_integration COMMAND test_hip_integration)
 
+add_executable(test_motor_backend_steadywin_can
+  test_motor_backend_steadywin_can.cpp
+  fakes/hal_fake.c
+  fakes/log_fake.c
+  fakes/hip_control_fake.c
+  ../app/control/hip_limits.c
+  ../app/control/hip_kinematics.c
+  ../app/drivers/motors/motor_backend_steadywin_can.c
+)
+
+target_include_directories(test_motor_backend_steadywin_can PRIVATE
+  fakes
+  ../app
+  ../app/control
+  ../app/utils
+  ../app/drivers
+  ../app/drivers/motors
+)
+
+target_link_libraries(test_motor_backend_steadywin_can PRIVATE Catch2::Catch2WithMain)
+
+add_test(NAME test_motor_backend_steadywin_can COMMAND test_motor_backend_steadywin_can)
+
 add_executable(test_motion_controller
   test_motion_controller.cpp
   fakes/log_fake.c

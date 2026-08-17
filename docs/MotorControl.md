@@ -1,4 +1,9 @@
-# Motor Control (Phase 3) — STM32 Driver Spec
+# Motor Control (Phase 3) — Historical UART Driver Spec
+
+> This document describes the retired STM32F103/SimpleFOC UART architecture.
+> The deployed hardware uses GIM8108-8 motors with GDS68 drivers on CAN Simple.
+> Use `docs/SteadywinCan.md` for the active wheel protocol and
+> `docs/SteadyWinUsbProvisioning.md` for commissioning.
 
 This document defines how to port the legacy motor protocol
 (`legacy/src/drivers/motors_binaryIO.{cpp,h}`) to STM32 for Motor 1 and 2, per

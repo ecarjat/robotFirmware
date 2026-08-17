@@ -79,7 +79,7 @@ TEST_CASE("hip integration: full jump sequence with simulated feedback", "[hip][
 
 TEST_CASE("hip integration: limit recovery with encoder feedback", "[hip][integration]")
 {
-    g_gpio_left_upper_state = 0U;
+    g_gpio_left_upper_state = GPIO_PIN_SET;
     hip_control_init();
 
     float theta_mid = 0.0f;
@@ -105,7 +105,7 @@ TEST_CASE("hip integration: limit recovery with encoder feedback", "[hip][integr
     hip_control_get_command(&cmd_left, nullptr);
     CHECK(cmd_left.pos_cmd_rev < pos_rev_from_theta(theta_mid));
 
-    g_gpio_left_upper_state = GPIO_PIN_SET;
+    g_gpio_left_upper_state = GPIO_PIN_RESET;
     for (uint32_t t = 50U; t < 50U + HIP_LIMIT_DEBOUNCE_SAMPLES; ++t) {
         hip_control_tick(t);
     }

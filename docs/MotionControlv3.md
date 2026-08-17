@@ -3,7 +3,8 @@
 Date: 2026-01-28
 
 ## 1. Purpose
-This document describes the updated control structure for a robot with:
+This document describes the updated control structure for a robot with four
+GIM8108-8/GDS68 CAN Simple actuators:
 - Two wheel motors for balance and locomotion.
 - Two hip motors that control posture/leg-length/ground-following and provide jumping capability (e.g., stair climbing).
 
@@ -20,7 +21,7 @@ The hip mechanism is a three-bar linkage that adjusts the overall height of the 
 ### Level 0: Wheel stabilization (fast)
 - Rate: 500-1000 Hz (existing loop).
 - Inputs: IMU pitch/roll, wheel speed, body rate.
-- Outputs: wheel torque (Iq).
+- Outputs: wheel torque (Nm).
 - Goal: maintain balance and commanded velocity.
 
 ### Level 1: Hip posture/height (medium)
@@ -123,29 +124,48 @@ Fault conditions:
 - Add behavior state machine in the high-level control layer (motion modes).
 - Ensure fault logic disables hip actuation independently if needed.
 
-## 10. Hip actuator hardware and protocol (GIM8108-8 / GDS68 / 2ES68)
-The hip actuator is a Steadywin GIM8108-8 with a GDS68 driver and an output encoder (2ES68 secondary encoder). The driver is controlled via CAN using the CAN Simple protocol (per `docs/SteadyWin GIM6010-8 Motor Manual_rev2.2.pdf`).
+## 10. Motor hardware and shared CAN protocol
+All actuators are Steadywin GIM8108-8 motors with GDS68 drivers. Hip motors
+also use 2ES68 secondary output encoders. The four drivers share FDCAN1 at
+500 kbit/s and use CAN Simple (per `docs/SteadyWin GIM6010-8 Motor
+Manual_rev2.2.pdf`).
 
-### 10.1 CAN Simple addressing
+### 10.1 Node allocation
+
+| Role | Node ID | Base CAN ID |
+|---|---:|---:|
+| Left wheel | `1` | `0x020` |
+| Right wheel | `2` | `0x040` |
+| Left hip | `3` | `0x060` |
+| Right hip | `4` | `0x080` |
+
+### 10.2 CAN Simple addressing
 - Standard CAN frame, 11-bit ID, 8-byte data, little-endian payload.
 - CAN ID format: **CAN_ID = (node_id << 5) | cmd_id**.
-- Choose unique node_id per hip (e.g., `hip_left = 0x03`, `hip_right = 0x04`).
+- Node IDs are provisioned once over USB-C and saved to each driver.
 
-### 10.2 Required control mode
+### 10.3 Wheel control
+- Wheel drives run torque/direct mode: `Set_Controller_Mode` (`0x00B`) with
+  values `1/1`.
+- Wheel torque uses `Set_Input_Torque` (`0x00E`) with a float32 Nm payload.
+- Wheel encoder estimates are periodic messages (`0x009`) configured at 10 ms
+  or faster. The wheel backend treats telemetry as stale after 30 ms.
+
+### 10.4 Hip required control mode
 - Hip actuators run in **position control**.
 - Use `Set_Controller_Mode` (CMD ID `0x00B`) with:
   - `Control_Mode = 3` (position control)
   - `Input_Mode = 3` (position filter) for smooth tracking
 - Enter closed-loop using `Set_Axis_State` (CMD ID `0x007`) with `Axis_Requested_State = 8`.
 
-### 10.3 Position command
+### 10.5 Hip position command
 - Use `Set_Input_Pos` (CMD ID `0x00C`):
   - `Input_Pos` float32 **rev** (output shaft)
   - `Vel_FF` int16 **0.001 rev/s** (optional)
   - `Torque_FF` int16 **0.001 Nm** (optional)
 - Command rate: 100-200 Hz (hip loop rate).
 
-### 10.4 Feedback and telemetry
+### 10.6 Feedback and telemetry
 - `Get_Encoder_Estimates` (CMD ID `0x009`):
   - `Pos_Estimate` float32 rev
   - `Vel_Estimate` float32 rev/s
@@ -154,7 +174,7 @@ The hip actuator is a Steadywin GIM8108-8 with a GDS68 driver and an output enco
   - `Torque` float32 Nm
 - Use `Heartbeat` (CMD ID `0x001`) for health and axis state.
 
-### 10.5 Zero/reference handling
+### 10.7 Zero/reference handling
 - Positions are based on the absolute encoder zero; define a **user zero** during commissioning.
 - If needed, use limit switches or manual offset configuration to align encoder zero to mechanical neutral.
 
@@ -273,7 +293,7 @@ Safety behavior:
 - If kinematics solver fails: do not update height; enter safe hold mode.
 
 ### 13.5 Limit switches (hip travel bounds)
-Hardware: 4 limit switches, NC to GND with pull-ups. Triggered state = logic low.
+Hardware: 4 limit switches, NC to GND with pull-ups. Triggered state = logic high.
 
 Pins (CubeMX generated names in `Core/Inc/main.h`):
 - LeftHipUpperLimit: `GPIOA` / `GPIO_PIN_8`
@@ -355,8 +375,8 @@ Logging rate:
 - State changes: log event stamps
 
 ### 13.11 CAN configuration
-- Node IDs:
-  - `hip_left = 0x03`, `hip_right = 0x04`
+- Bus rate: **500 kbit/s** over FDCAN1 with four standard node filters.
+- Node IDs: left wheel `1`, right wheel `2`, left hip `3`, right hip `4`.
 - CAN Simple ID:
   - `CAN_ID = (node_id << 5) | cmd_id`
 - Required commands:
@@ -369,12 +389,14 @@ Timeouts:
 - If `Heartbeat` not received for 200 ms, flag CAN fault and disable hip.
 
 CAN scheduling (shared with wheels):
-- Priority: wheel control IDs highest, hip position next, telemetry lowest.
-- Hip position request rate: **100 Hz** (per hip).
-- Hip telemetry (encoder + torque): **50 Hz** (per hip, stagger if needed).
-- Heartbeat poll: **5–10 Hz**.
-- Request timeout: **50 ms** for position command ack (if required by driver).
-- Telemetry timeout: **200 ms** (aligns with heartbeat fault).
+- Priority: wheel torque IDs highest, hip position next, telemetry lowest.
+- Wheel telemetry is drive-published periodic traffic; it is not requested by a
+  host command. Configure `encoder_rate_ms = 10` over USB-C before deployment.
+- Hip position command rate: **100 Hz** (per hip).
+- Hip telemetry and heartbeat configuration should also use periodic
+  drive-published messages. The current hip path still issues polling frames;
+  migrate it before relying on those telemetry values for safety decisions.
+- Telemetry timeout: **200 ms** for hips; **30 ms** for wheel encoders.
 
 Startup sequence (defaults):
 1) Boot: initialize FDCAN, filters, and enable notifications.
@@ -385,7 +407,8 @@ Startup sequence (defaults):
 6) Start hip command loop at **100 Hz** with:
    - If in limit‑recovery, command slow motion away from the active limit.
    - Else hold current height using `Set_Input_Pos`.
-7) Start telemetry polling at **50 Hz**; start heartbeat at **5–10 Hz**.
+7) Verify the configured periodic telemetry is being received before enabling
+   dynamic hip behavior.
 
 ### 13.12 Test plan (minimum)
 Unit tests:

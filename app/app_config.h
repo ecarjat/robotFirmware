@@ -40,20 +40,12 @@
 #endif
 
 #ifndef MOTOR_LINK_CAN_LEFT_ID
+/* CAN Simple node IDs, not complete arbitration IDs. */
 #define MOTOR_LINK_CAN_LEFT_ID 0x01U
 #endif
 
 #ifndef MOTOR_LINK_CAN_RIGHT_ID
 #define MOTOR_LINK_CAN_RIGHT_ID 0x02U
-#endif
-
-#ifndef MOTOR_LINK_CAN_REQ_ID_PREFIX
-#define MOTOR_LINK_CAN_REQ_ID_PREFIX 0x100U
-#endif
-
-#ifndef MOTOR_LINK_CAN_REQ_ID
-#define MOTOR_LINK_CAN_REQ_ID(addr)                                            \
-  (MOTOR_LINK_CAN_REQ_ID_PREFIX | ((addr) & 0x7FFU))
 #endif
 
 #ifndef APP_ENABLE_PROFILING

@@ -87,9 +87,9 @@ D2. I2C2 scan + BMM150 ID
 D3. SPI6 ICM-42688 WHOAMI
 D4. IMU DRDY EXTI line toggling (optional)
 
-### Phase E — Serial Links
+### Phase E — Communications Links
 E1. ESP32 spine UART (framing sanity)
-E2. Motor UART links (per-node ping)
+E2. Motor CAN bus (GDS68 node and telemetry check)
 E3. LiDAR UART parsing (per sensor)
 
 ### Phase F — Integration
@@ -288,16 +288,24 @@ Notes:
 
 ---
 
-### E2) Motor UART Link Ping (per node)
-Purpose: validate each motor node connection without moving motors.
+### E2) Motor CAN Bus (GDS68 CAN Simple)
+Purpose: validate the shared 500 kbit/s CAN bus and each motor node without
+moving the robot.
 Procedure:
-1) for each motor UART:
-   - send `PING`
-   - expect `PONG` + node info
+1) Confirm the CAN bus has two, and only two, 120 ohm terminators.
+2) Provision node IDs `1..4` and set periodic encoder feedback with the USB-C
+   procedure in `docs/SteadyWinUsbProvisioning.md`.
+3) Power the STM32 with motor output disabled.
+4) Observe periodic `Get_Encoder_Estimates` frames for nodes `1` and `2`:
+   `0x029` and `0x049` at 10 ms or faster.
+5) With wheels clear of the ground, enable the motor link and verify each
+   wheel receives zero torque before closed-loop state is requested.
 PASS:
-- all online nodes respond
+- wheel telemetry is received for both wheel nodes within 30 ms
+- all four node IDs are unique and no FDCAN bus-off occurs
 FAIL:
-- any node missing → show which UART/pins
+- missing/duplicate node, incorrect bitrate, missing termination, or no CAN
+  transceiver wiring
 
 ---
 
@@ -324,6 +332,7 @@ Enable simultaneously:
 - QSPI periodic read
 - SD periodic write (every 2s)
 - I2C IMU read at 200–400Hz (cached)
+- FDCAN wheel telemetry at 10 ms or faster
 - Ensure CPU load acceptable
 
 PASS:
@@ -362,6 +371,7 @@ System passes bring-up when:
 - QSPI JEDEC + R/W passes
 - I2C1 BMI270 ID OK, I2C2 BMM150 ID OK, SPI6 ICM-42688 ID OK
 - UART2 at 921600 is stable
+- FDCAN1 communicates with wheel nodes `1` and `2` at 500 kbit/s without bus-off
 - Timer 1kHz stable
 - No HardFaults, no brownouts under integration stress
 

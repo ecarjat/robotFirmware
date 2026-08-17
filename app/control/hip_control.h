@@ -71,6 +71,7 @@ uint32_t hip_control_get_faults(void);
 bool hip_control_on_can_rx(uint32_t id, const uint8_t *data, uint8_t len, uint32_t t_ms);
 void hip_control_on_bus_off(void);
 void hip_control_on_bus_recovered(void);
+bool hip_control_program_node_id(uint8_t current_node_id, uint8_t new_node_id, bool save);
 
 #ifdef __cplusplus
 }

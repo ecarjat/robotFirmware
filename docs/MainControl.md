@@ -1,20 +1,25 @@
-# Main Control Sketch (Torque via Estimated Current: SimpleFOC Voltage Mode + Dual-IMU EKF Pattern A)
-Target: Self-balancing robot where **STM32H723** runs the outer state estimator + balance/speed/steering controller, and each wheel controller (**STM32F103 + SimpleFOC**) runs SimpleFOC voltage torque mode with estimated current + Back‑EMF compensation (no current sensor). Two IMUs: **IMU1 (BMI270)** as primary and **IMU2 (ICM-42688)** as secondary for validation and fallback.
+# Main Control Sketch (GDS68 CAN Simple + Dual-IMU EKF Pattern A)
+Target: self-balancing robot where the **STM32H723** runs the state estimator
+and balance/speed/steering controller. The two wheel actuators are
+GIM8108-8/GDS68 drives on the shared CAN Simple bus; the STM32 sends torque
+commands directly in Nm. Two IMUs are used: **IMU1 (BMI270)** as primary and
+**IMU2 (ICM-42688)** for validation and fallback.
 
-Telemetry: 500 Hz  
+Wheel encoder telemetry: 100 Hz minimum (10 ms configured on each drive)
 Main control: rate set in robot_params  
 IMU sampling: DRDY -> DMA (gyro ODR 800 Hz, accel ODR 400 Hz)
 
 ---
 
 ## 1) Control architecture (cascade with dual-IMU fusion)
-- **Motor drivers (F103)**: SimpleFOC FOC loop at 2.5 kHz using **Voltage torque mode with estimated current + Back‑EMF compensation** (requires characterized `motor.phase_resistance` and `motor.KV_rating`).
+- **Wheel drives (GIM8108-8/GDS68)**: run their internal FOC loop and accept
+  CAN Simple `Set_Input_Torque` commands in Nm.
 - **STM32H723**:
   - Read IMUs using SPI + DMA, DRDY flags
   - EKF estimates tilt, tilt rate, gyro bias
   - Health checks using IMU2 for validation
   - Main PID controller produces torque commands
-  - Outputs desired torque-producing current (A) to motor drivers; SimpleFOC converts this to Uq internally.
+  - Outputs wheel torque commands (Nm) to the GDS68 drives over FDCAN1.
 
 ---
 
@@ -75,44 +80,33 @@ R = [1  0  0]    // sensor X → body X
 
 ---
 
-## 2.1 Motor command model (SimpleFOC voltage torque mode with current estimation + Back‑EMF compensation)
-Because the motor drivers are characterized (phase resistance **R** and motor **KV**), the outer controller should command **desired torque‑producing current** (Amps) instead of raw voltage.
+## 2.1 Motor command model (GDS68 CAN Simple torque control)
+The outer controller commands wheel torque in Nm. `motor_link_set_wheel_torques`
+clamps each requested torque, applies the configured wheel direction, and sends
+CAN Simple `Set_Input_Torque` (`0x00E`) with a float32 Nm payload.
 
-SimpleFOC will estimate the required q‑axis voltage while compensating the motor back‑EMF using measured motor velocity:
+The wheel drives use node IDs `1` and `2`; their arbitration IDs are formed as
+`(node_id << 5) | command_id`. Commands are enabled only after the backend has
+cleared errors, selected torque/direct mode, sent zero torque, and requested
+closed-loop state. Disabling sends zero torque then requests Idle.
 
-- Desired current: `Iq_ref` (A)  
-- Estimated voltage command: `Uq = Iq_ref * R + U_bemf`  
-- Back‑EMF term: `U_bemf ≈ v / KV` (using motor velocity tracking)
+Wheel velocity is received from periodic `Get_Encoder_Estimates` (`0x009`)
+messages and converted from rev/s to rad/s. Configure
+`odrv0.axis0.config.can.encoder_rate_ms = 10` and save it on each wheel drive.
 
-This means our outer loop output is in **Amps**, and the F103 driver converts it to the appropriate voltage automatically.
-
-**Torque mapping (for intuition / tuning):** motor torque is proportional to current:
-- `tau ≈ Kt * Iq`  
-- `Kt` is related to the motor’s electrical constant; for a KV‑rated motor, a common approximation is `Kt ≈ 60 / (2π * KV_rpm_per_V)`.
-
-**Driver-side configuration (F103):**
-- set `motor.phase_resistance = <measured_ohms>`
-- set `motor.KV_rating = <motor_KV_rpm_per_V>`
-- keep `motor.torque_controller = TorqueControlType::voltage` (voltage mode)
-- then in torque mode, set target in **Amps** (estimated current mode)
-
-**Implications:**
-- Better repeatability than plain `Uq` commands, but still not as accurate as true current sensing.
-- Battery voltage variation is partially handled via the back‑EMF term; still keep output clamps and integrator anti‑windup.
-
-**Command sign + direction:**
-- `Iq_ref` sign convention: positive = forward torque.
-- Apply a per-motor direction parameter when sending commands to SimpleFOC.
+`motor_link_set_wheel_Iq()` remains only for callers that explicitly work in
+current. It requires a calibrated motor torque constant to convert amperes to
+the GDS68 torque unit. The normal balance path uses Nm directly.
 
 ### 2.3 Motor link API (implemented)
 Motor command transmission and wheel velocity feedback are implemented in `Drivers/motors/motor_link.h`:
 
 **Sending motor commands:**
 ```c
-// Set Iq targets directly (Amps) - preferred for balance control
+// Set Iq targets directly (Amps); requires a calibrated motor Kt.
 void motor_link_set_wheel_Iq(float left_A, float right_A, float max_A);
 
-// Set torque targets (Nm) - converted internally to Iq via Kt
+// Set direct GDS68 torque targets (Nm) - preferred for balance control.
 void motor_link_set_wheel_torques(float left_Nm, float right_Nm, float max_Nm);
 ```
 
@@ -123,8 +117,8 @@ bool motor_link_get_wheel_velocities(float *left_rad_s, float *right_rad_s);
 ```
 
 **Implementation notes:**
-- Commands are sent via UART to F103 motor drivers at the control tick rate.
-- Wheel velocities are reported back via motor driver telemetry.
+- Commands are sent through FDCAN1 at 500 kbit/s to nodes `1` and `2`.
+- Wheel velocities arrive through periodic GDS68 encoder-estimate telemetry.
 - **No latency compensation** is applied to wheel velocity readings; the control loop uses the most recent available value.
 - For forward velocity: `v = (wL + wR) / 2 * wheel_radius`
 - For yaw rate from encoders: `yawRate_enc = (wR - wL) / wheelbase`
@@ -301,11 +295,12 @@ uCommon = uBal - Kv_damp * v
 // yawRate = alpha*gyroZ + (1-alpha)*yawRate_enc, alpha = 0.8 (stage-1 default)
 uTurn = K_turn*turnRef - K_yawDamp*yawRate
 
-IqL_ref = clamp(uCommon - uTurn, -IqMax, +IqMax)
-IqR_ref = clamp(uCommon + uTurn, -IqMax, +IqMax)
+tauL_ref = clamp(uCommon - uTurn, -tauMax, +tauMax)
+tauR_ref = clamp(uCommon + uTurn, -tauMax, +tauMax)
 ```
 
-Send {IqL_ref, IqR_ref} over UART to the F103 motor drivers; the drivers run SimpleFOC in voltage torque mode with current estimation.
+Send `{tauL_ref, tauR_ref}` through `motor_link_set_wheel_torques()` to the
+GDS68 wheel drives.
 
 ### 5.1 Control gains (stored in robot_params)
 
@@ -590,7 +585,8 @@ This section summarizes what the **current MotionControl implementation** alread
 - **Scheduling model**: A hardware timer drives a deterministic control tick (currently targeted at **1 kHz**), and the control tick is designed to be bounded and non-blocking.
 - **Motion modes**: A mode state machine exists (or is planned) with at least DISARMED / CALIBRATION / BALANCING / FAULT, gating outputs to ensure safety.
 - **Sensor adapter boundary**: IMU readings are acquired and converted into the estimator’s expected units at a single adapter boundary; missing samples are handled via valid flags / last-known sample strategy.
-- **Motor link abstraction**: Motor commands are sent via a dedicated motor layer/protocol (UART) so that the main control loop never blocks on motor I/O.
+- **Motor link abstraction**: Motor commands are sent via a dedicated CAN
+  Simple backend so that the main control loop never blocks on motor I/O.
 - **Telemetry plumbing**: A low-rate telemetry path exists (or is planned) to publish estimator/controller outputs without stalling the control loop.
 
 ## 13) TODO to reach the desired final state (this document)
@@ -599,13 +595,14 @@ This section lists what must be amended so the implementation matches the **Main
 ### Control-rate alignment
 - Ensure telemetry at **500 Hz** does not block control (use queue/ring-buffer + separate task).
 
-### Motor command semantics (Iq targets)
-- Update the STM32H723 → motor-driver protocol so the outer loop sends `{IqL_ref, IqR_ref}` (Amps) as the primary command.
-- On each STM32F103 motor driver, ensure SimpleFOC is configured with:
-  - `motor.phase_resistance` and `motor.KV_rating`
-  - voltage torque mode + estimated current + Back‑EMF compensation
-  - a clear clamp (`IqMax`) and consistent sign convention
-- Add (optional but recommended) telemetry from motor drivers for: `estimated_Uq`, `bus_voltage`, `shaft_velocity`, and saturation flags so we can validate current→voltage conversion and limits.
+### Motor command semantics (torque targets)
+- Use `{tauL_ref, tauR_ref}` in Nm as the primary wheel command.
+- Ensure wheel node IDs are `1` and `2`, FDCAN1 runs at 500 kbit/s, and
+  periodic encoder estimates are configured at 10 ms or faster.
+- Characterize and configure the mechanical torque limits before raising
+  `tauMax`; the GDS68 command is a direct torque request, not a voltage target.
+- Log wheel torque, encoder velocity, bus voltage, and drive fault state during
+  tuning.
 
 ### Dual-IMU integration (Pattern A)
 - Implement the Pattern A health metrics and gating in code:
@@ -642,9 +639,10 @@ These must be resolved (or explicitly frozen as defaults) before final tuning.
   - applied in `uTurn = K_turn*turnRef - K_yawDamp*yawRate`
   - log `gyroZ`, `yawRate_enc`, and `yawRate` for tuning
 
-### Current limits and brownout handling
-- Determine `IqMax` relative to motor heating and driver limits (no true current sensing).
-- Consider battery-voltage-aware clamps (reduce `IqMax` / detect brownout) to prevent undervoltage resets under aggressive correction.
+### Torque limits and brownout handling
+- Determine `tauMax` from the motor, gearbox, and driver thermal limits.
+- Consider battery-voltage-aware torque clamps and regeneration handling to
+  prevent undervoltage or overvoltage faults during aggressive correction.
 
 ---
 

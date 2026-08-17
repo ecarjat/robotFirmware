@@ -1,5 +1,5 @@
 # PIN_MAPPING.md — WeAct STM32H723VGT6 (WeAct STM32H7xx Board V1.2) Robot Wiring
-Version: 1.2 (Primary IMU = BMI270)  
+Version: 1.3 (Primary IMU = BMI270)
 Audience: Codex + embedded firmware implementation (STM32CubeIDE/HAL or LL)
 
 ## 0) Goal
@@ -13,7 +13,7 @@ Constraints:
 - Do not reuse pins consumed by **on-board TFT**, **microSD**, **USB FS**, **QSPI flash**, **SWD**.
 - Use **SPI6** for BMI270 + ICM42688 + BMM150 (CS on PD14/PD15/PD10).
 - Use **UART for all 3 TFmini Plus**.
-- Use **4 dedicated UART links** for 4 motor driver nodes.
+- Use one shared **FDCAN1** bus for the four GIM8108-8/GDS68 motor drivers.
 - Use **1 UART spine** between STM32 and ESP32 @ 921600 + optional RTS/CTS.
 - USB FS port is reserved for STM32↔Pi (CDC + FILE API).
 
@@ -118,26 +118,25 @@ Firmware requirements:
 
 ---
 
-## 5) Motor Drivers (4× UART links)
-Motor protocol must remain compatible with:
-https://github.com/ecarjat/T-Storm32NT-simpleFoc/blob/main/README.md
+## 5) Motor Drivers (shared FDCAN1 bus)
 
-### 5.1 Motor #1 UART
-- PB14  = USART1_TX
-- PB15 = USART1_RX  
-- DMA
-### 5.2 Motor #2 UART (DCMI pins repurposed; camera unused)
-- PC6 = USART6_TX
-- PC7 = USART6_RX  
-- DMA
-### 5.3 Motor #3 UART (DCMI pins repurposed; camera unused)
-- PD8 = USART3_TX
-- PD9 = USART3_RX  
-- DMA
-### 5.4 Motor #4 UART (DCMI pins repurposed; camera unused)
-- PD0 = UART4_RX
-- PD1 = UART4_TX  
-- DMA
+All four GIM8108-8 motors use GDS68 drivers and the CAN Simple protocol. The
+STM32 connects through a 3.3 V-compatible CAN transceiver; do not connect PD0
+or PD1 directly to CANH/CANL.
+
+| STM32 pin | CubeMX signal | Bus function |
+|---|---|---|
+| `PD0` | `FDCAN1_RX` | CAN transceiver RX output |
+| `PD1` | `FDCAN1_TX` | CAN transceiver TX input |
+
+- Nominal bus rate: **500 kbit/s**.
+- Standard 11-bit CAN frames: `CAN_ID = (node_id << 5) | command_id`.
+- Terminate the physical bus only at its two ends with 120 ohm resistors.
+- Node allocation: left wheel `1`, right wheel `2`, left hip `3`, right hip
+  `4`.
+- Provision node IDs and periodic encoder feedback over USB-C before the
+  motors share the bus. See `docs/SteadyWinUsbProvisioning.md` and
+  `docs/SteadywinCan.md`.
 
 
 ---
@@ -163,14 +162,35 @@ Firmware:
 
 ---
 
-## 7) LEDs
+## 7) Hip Travel Limit Switches
+
+All four switches are **normally closed (NC) to GND**. The STM32 pins use
+internal pull-ups: an untripped switch reads **low**, while a reached limit
+opens the contact and reads **high**.
+
+- PA8 = `LeftHipUpperLimit`
+- PA10 = `LeftHipLowerLimit`
+- PD3 = `RightHipUpperLimit`
+- PD5 = `RightHipLowerLimit`
+
+These are GPIO inputs, polled and software-debounced by the hip-control loop;
+the firmware treats a high input as limit active.
+
+Mechanical meaning:
+
+- **Upper limit**: actuated at the hip's maximum height / fully extended
+  position. It prevents further extension.
+- **Lower limit**: actuated at the hip's minimum height / fully retracted
+  (crouched) position. It prevents further retraction.
+
+## 8) LEDs
 - PE3  = on-board BLUE_LED 
 - PB1 = external LED_GREEN
 - PB0  = external LED_RED  
 
 ---
 
-## 8) Buttons 
+## 9) Buttons
 - PA4 = BTN_ARM
 - PE4  = BTN_MODE
 - PE5  = BTN_CAL
@@ -181,7 +201,7 @@ Firmware:
 - NRST = SW3
 ---
 
-## 9) Codex instructions (must follow)
+## 10) Codex instructions (must follow)
 1) Use this mapping as source-of-truth.
 2) Generate CubeMX/HAL init for:
    - I2C1

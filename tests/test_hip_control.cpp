@@ -16,9 +16,11 @@ constexpr float kPi = 3.14159265358979323846f;
 constexpr uint8_t kNodeLeft = 0x03;
 constexpr uint8_t kNodeRight = 0x04;
 constexpr uint8_t kCmdSetAxisState = 0x07;
+constexpr uint8_t kCmdSetAxisNodeId = 0x06;
 constexpr uint8_t kCmdSetCtrlMode = 0x0B;
 constexpr uint8_t kCmdSetInputPos = 0x0C;
 constexpr uint8_t kCmdGetEncoder = 0x09;
+constexpr uint8_t kCmdSaveConfig = 0x1F;
 
 uint32_t make_id(uint8_t node_id, uint8_t cmd_id) {
     return (static_cast<uint32_t>(node_id) << 5) | (cmd_id & 0x1FU);
@@ -26,10 +28,10 @@ uint32_t make_id(uint8_t node_id, uint8_t cmd_id) {
 
 void reset_fakes(void) {
     g_fdcan_tx_count = 0;
-    g_gpio_left_upper_state = GPIO_PIN_SET;
-    g_gpio_left_lower_state = GPIO_PIN_SET;
-    g_gpio_right_upper_state = GPIO_PIN_SET;
-    g_gpio_right_lower_state = GPIO_PIN_SET;
+    g_gpio_left_upper_state = GPIO_PIN_RESET;
+    g_gpio_left_lower_state = GPIO_PIN_RESET;
+    g_gpio_right_upper_state = GPIO_PIN_RESET;
+    g_gpio_right_lower_state = GPIO_PIN_RESET;
 }
 
 void pack_f32(uint8_t *dst, float value) {
@@ -98,6 +100,31 @@ bool get_last_input_pos(uint8_t node_id, float *pos_rev, float *vel_ff_rev_s, fl
 }
 
 }  // namespace
+
+TEST_CASE("hip_control programs CAN Simple node id and optional save", "[hip][programming]")
+{
+    reset_fakes();
+
+    REQUIRE(hip_control_program_node_id(0U, 3U, true));
+    REQUIRE(g_fdcan_tx_count == 2U);
+
+    CHECK(g_fdcan_tx_headers[0].Identifier == make_id(0U, kCmdSetAxisNodeId));
+    uint32_t programmed_id = 0U;
+    std::memcpy(&programmed_id, g_fdcan_tx_data[0], sizeof(programmed_id));
+    CHECK(programmed_id == 3U);
+
+    CHECK(g_fdcan_tx_headers[1].Identifier == make_id(3U, kCmdSaveConfig));
+    CHECK(g_fdcan_tx_headers[1].DataLength == FDCAN_DLC_BYTES_0);
+}
+
+TEST_CASE("hip_control rejects invalid CAN Simple node ids", "[hip][programming]")
+{
+    reset_fakes();
+
+    CHECK_FALSE(hip_control_program_node_id(64U, 3U, false));
+    CHECK_FALSE(hip_control_program_node_id(0U, 64U, false));
+    CHECK(g_fdcan_tx_count == 0U);
+}
 
 TEST_CASE("hip_control startup sequence sends ctrl mode then axis state")
 {
@@ -365,7 +392,7 @@ TEST_CASE("hip_control concurrent faults include bus-off and encoder timeout", "
 TEST_CASE("hip_control recovery mode engages after debounced limit", "[hip][limits]")
 {
     reset_fakes();
-    g_gpio_left_upper_state = 0U;
+    g_gpio_left_upper_state = GPIO_PIN_SET;
 
     hip_control_init();
     hip_control_tick(0U);
@@ -398,7 +425,7 @@ TEST_CASE("hip_control recovery mode engages after debounced limit", "[hip][limi
 TEST_CASE("hip_control recovery stops after max travel without opposite limit", "[hip][limits]")
 {
     reset_fakes();
-    g_gpio_left_upper_state = 0U;
+    g_gpio_left_upper_state = GPIO_PIN_SET;
 
     hip_control_init();
     hip_control_tick(0U);
@@ -439,7 +466,7 @@ TEST_CASE("hip_control recovery stops after max travel without opposite limit", 
 TEST_CASE("hip_control recovery exits when limit clears", "[hip][limits]")
 {
     reset_fakes();
-    g_gpio_left_upper_state = 0U;
+    g_gpio_left_upper_state = GPIO_PIN_SET;
 
     hip_control_init();
     hip_control_tick(0U);
@@ -454,7 +481,7 @@ TEST_CASE("hip_control recovery exits when limit clears", "[hip][limits]")
         hip_control_tick(t);
     }
 
-    g_gpio_left_upper_state = GPIO_PIN_SET;
+    g_gpio_left_upper_state = GPIO_PIN_RESET;
     for (uint32_t t = 20U; t < 20U + HIP_LIMIT_DEBOUNCE_SAMPLES; ++t) {
         hip_control_tick(t);
     }
@@ -477,7 +504,7 @@ TEST_CASE("hip_control recovery exits when limit clears", "[hip][limits]")
 TEST_CASE("hip_control recovery timeout releases to target", "[hip][limits]")
 {
     reset_fakes();
-    g_gpio_left_upper_state = 0U;
+    g_gpio_left_upper_state = GPIO_PIN_SET;
 
     hip_control_init();
     hip_control_tick(0U);
@@ -593,7 +620,7 @@ TEST_CASE("hip_control limit prevents moving further into limit", "[hip][limits]
     hip_control_tick(0U);
     hip_control_tick(10U);
 
-    g_gpio_left_upper_state = 0U;
+    g_gpio_left_upper_state = GPIO_PIN_SET;
 
     float theta_max = 0.0f;
     REQUIRE(hip_kinematics_theta_from_height(0.65f, &theta_max));

@@ -17,17 +17,27 @@ TIM_HandleTypeDef htim2 = {
 GPIO_TypeDef g_gpioa = {0};
 GPIO_TypeDef g_gpiod = {0};
 
-uint8_t g_gpio_left_upper_state = GPIO_PIN_SET;
-uint8_t g_gpio_left_lower_state = GPIO_PIN_SET;
-uint8_t g_gpio_right_upper_state = GPIO_PIN_SET;
-uint8_t g_gpio_right_lower_state = GPIO_PIN_SET;
+uint8_t g_gpio_left_upper_state = GPIO_PIN_RESET;
+uint8_t g_gpio_left_lower_state = GPIO_PIN_RESET;
+uint8_t g_gpio_right_upper_state = GPIO_PIN_RESET;
+uint8_t g_gpio_right_lower_state = GPIO_PIN_RESET;
 
-FDCAN_HandleTypeDef hfdcan1 = {0};
+FDCAN_HandleTypeDef hfdcan1 = {.Instance = FDCAN1};
 
 enum { TEST_FDCAN_TX_MAX = 16 };
+enum { TEST_FDCAN_RX_MAX = 16 };
 uint32_t g_fdcan_tx_count = 0;
 FDCAN_TxHeaderTypeDef g_fdcan_tx_headers[TEST_FDCAN_TX_MAX];
 uint8_t g_fdcan_tx_data[TEST_FDCAN_TX_MAX][8];
+
+typedef struct {
+    FDCAN_RxHeaderTypeDef header;
+    uint8_t data[8];
+} test_fdcan_rx_frame_t;
+
+static test_fdcan_rx_frame_t s_fdcan_rx[TEST_FDCAN_RX_MAX];
+static uint32_t s_fdcan_rx_head = 0U;
+static uint32_t s_fdcan_rx_tail = 0U;
 
 uint32_t g_hal_pclk1_freq = 100000000U;
 uint32_t g_hal_hclk_freq = 200000000U;
@@ -104,6 +114,115 @@ int HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *hfdcan,
     }
     g_fdcan_tx_count++;
     return HAL_OK;
+}
+
+uint32_t HAL_FDCAN_GetTxFifoFreeLevel(FDCAN_HandleTypeDef *hfdcan)
+{
+    (void)hfdcan;
+    return 1U;
+}
+
+int HAL_FDCAN_ConfigFilter(FDCAN_HandleTypeDef *hfdcan,
+                           FDCAN_FilterTypeDef *filter)
+{
+    (void)hfdcan;
+    (void)filter;
+    return HAL_OK;
+}
+
+int HAL_FDCAN_ConfigGlobalFilter(FDCAN_HandleTypeDef *hfdcan,
+                                 uint32_t non_matching_std,
+                                 uint32_t non_matching_ext,
+                                 uint32_t reject_remote_std,
+                                 uint32_t reject_remote_ext)
+{
+    (void)hfdcan;
+    (void)non_matching_std;
+    (void)non_matching_ext;
+    (void)reject_remote_std;
+    (void)reject_remote_ext;
+    return HAL_OK;
+}
+
+int HAL_FDCAN_ConfigInterruptLines(FDCAN_HandleTypeDef *hfdcan,
+                                   uint32_t active_its, uint32_t line)
+{
+    (void)hfdcan;
+    (void)active_its;
+    (void)line;
+    return HAL_OK;
+}
+
+int HAL_FDCAN_ActivateNotification(FDCAN_HandleTypeDef *hfdcan,
+                                   uint32_t active_its,
+                                   uint32_t buffer_indexes)
+{
+    (void)hfdcan;
+    (void)active_its;
+    (void)buffer_indexes;
+    return HAL_OK;
+}
+
+int HAL_FDCAN_Start(FDCAN_HandleTypeDef *hfdcan)
+{
+    (void)hfdcan;
+    return HAL_OK;
+}
+
+uint32_t HAL_FDCAN_GetRxFifoFillLevel(FDCAN_HandleTypeDef *hfdcan,
+                                      uint32_t rx_fifo)
+{
+    (void)hfdcan;
+    (void)rx_fifo;
+    return s_fdcan_rx_head - s_fdcan_rx_tail;
+}
+
+int HAL_FDCAN_GetRxMessage(FDCAN_HandleTypeDef *hfdcan, uint32_t rx_fifo,
+                           FDCAN_RxHeaderTypeDef *header, uint8_t *data)
+{
+    (void)hfdcan;
+    (void)rx_fifo;
+    if (header == NULL || data == NULL || s_fdcan_rx_tail == s_fdcan_rx_head) {
+        return HAL_ERROR;
+    }
+
+    test_fdcan_rx_frame_t *frame =
+        &s_fdcan_rx[s_fdcan_rx_tail % TEST_FDCAN_RX_MAX];
+    *header = frame->header;
+    memcpy(data, frame->data, sizeof(frame->data));
+    s_fdcan_rx_tail++;
+    return HAL_OK;
+}
+
+void hal_fake_fdcan_reset(void)
+{
+    g_fdcan_tx_count = 0U;
+    memset(g_fdcan_tx_headers, 0, sizeof(g_fdcan_tx_headers));
+    memset(g_fdcan_tx_data, 0, sizeof(g_fdcan_tx_data));
+    memset(s_fdcan_rx, 0, sizeof(s_fdcan_rx));
+    s_fdcan_rx_head = 0U;
+    s_fdcan_rx_tail = 0U;
+}
+
+void hal_fake_fdcan_push_rx(uint32_t identifier, uint32_t data_length,
+                            const uint8_t *data)
+{
+    if ((s_fdcan_rx_head - s_fdcan_rx_tail) >= TEST_FDCAN_RX_MAX) {
+        return;
+    }
+
+    test_fdcan_rx_frame_t *frame =
+        &s_fdcan_rx[s_fdcan_rx_head % TEST_FDCAN_RX_MAX];
+    frame->header.Identifier = identifier;
+    frame->header.IdType = FDCAN_STANDARD_ID;
+    frame->header.RxFrameType = FDCAN_DATA_FRAME;
+    frame->header.DataLength = data_length;
+    if (data != NULL) {
+        memcpy(frame->data, data, sizeof(frame->data));
+    } else {
+        memset(frame->data, 0, sizeof(frame->data));
+    }
+    s_fdcan_rx_head++;
 }
 
 uint32_t __get_PRIMASK(void)

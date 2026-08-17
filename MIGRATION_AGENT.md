@@ -1,4 +1,9 @@
 # MIGRATION_AGENT.md — Codex-ready Migration Agent (ESP32 → STM32H723 + ESP32 Coprocessor)
+
+> Historical migration plan. Its UART motor topology and IMU bus assignments
+> are superseded by `Pinmap.md`, `STM32_External_Module_Pinmap.md`, and
+> `docs/SteadywinCan.md`.
+
 Version: 1.0  
 Audience: Codex (code generation + refactor assistant)  
 Primary goal: Port an existing ESP32 codebase (motors + sensors + logging + estimator/control) to STM32H723, leaving ESP32 as BT + Wi-Fi portal coprocessor.
