@@ -1,0 +1,9 @@
+[submodule "libs/BMI270_SensorAPI"]
+	path = libs/BMI270_SensorAPI
+	url = https://github.com/boschsensortec/BMI270_SensorAPI.git
+[submodule "libs/BMM150_SensorAPI"]
+	path = libs/BMM150_SensorAPI
+	url = https://github.com/boschsensortec/BMM150_SensorAPI.git
+[submodule "libs/ICM42688"]
+	path = libs/ICM42688
+	url = https://github.com/finani/ICM42688.git
