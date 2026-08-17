@@ -70,6 +70,12 @@ Recommended actions:
 
 ### P0 — RPC can install unsafe live parameters
 
+Status: fixed. `SET_PARAM` now accepts only declared parameter fields, validates
+the full candidate (finite values, physical limits, calibration matrices, and
+cross-field constraints), and rejects parameter writes while balancing or
+manual motor mode is active. `control_timer_set_rate_hz()` also falls back for
+non-finite input.
+
 app/app_rpc.c:243-263 accepts a byte offset and length, copies arbitrary bytes
 into a candidate robot_params_t, and applies it after only bounds checks. No
 schema-level validation occurs before motion_control_apply_params or

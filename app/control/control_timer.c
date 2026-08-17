@@ -4,6 +4,7 @@
 #include "stm32h7xx_hal.h"
 #include "stm32h7xx_hal_tim.h"
 #include "stm32h7xx_ll_rcc.h"
+#include <math.h>
 #include <stddef.h>
 
 /* DWT cycle counter for high-resolution timing */
@@ -93,7 +94,7 @@ void control_timer_start(void)
 
 void control_timer_set_rate_hz(float rate_hz)
 {
-    if (rate_hz <= 1e-3f) {
+    if (!isfinite(rate_hz) || rate_hz <= 1e-3f) {
         rate_hz = CONTROL_DEFAULT_HZ;
     }
 
